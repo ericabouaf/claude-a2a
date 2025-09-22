@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import express from "express";
 import { AGENT_CARD_PATH, type AgentCard } from "@a2a-js/sdk";
 import { DefaultRequestHandler, InMemoryTaskStore } from "@a2a-js/sdk/server";
