@@ -1,13 +1,13 @@
 {
   "name": "claude-a2a",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "A2A server wrapper around Claude Code SDK",
   "main": "dist/server.js",
   "bin": {
-    "claude-a2a": "./dist/server.js"
+    "claude-a2a": "dist/server.js"
   },
   "scripts": {
-    "build": "tsc",
+    "dist": "npx tsc -p tsconfig.cli.json",
     "dev": "tsx src/server.ts",
     "typecheck": "tsc --noEmit"
   },
@@ -33,5 +33,9 @@
     "@types/node": "^24.5.2",
     "tsx": "^4.20.5",
     "typescript": "^5.9.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://github.com/ericabouaf/claude-a2a.git"
   }
 }
