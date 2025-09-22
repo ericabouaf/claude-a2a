@@ -1,0 +1,37 @@
+{
+  "name": "claude-a2a",
+  "version": "0.0.1",
+  "description": "A2A server wrapper around Claude Code SDK",
+  "main": "dist/server.js",
+  "bin": {
+    "claude-a2a": "./dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "a2a",
+    "claude",
+    "cc",
+    "ccsdk",
+    "agent"
+  ],
+  "author": "Eric Abouaf <eric.abouaf@gmail.com>",
+  "license": "ISC",
+  "dependencies": {
+    "@a2a-js/sdk": "^0.3.4",
+    "@anthropic-ai/claude-code": "^1.0.119",
+    "@types/node": "^24.5.2",
+    "chalk": "^5.6.2",
+    "dotenv": "^17.2.2",
+    "express": "^5.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.5.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}
