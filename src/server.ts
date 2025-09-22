@@ -6,9 +6,11 @@ import { DefaultRequestHandler, InMemoryTaskStore } from "@a2a-js/sdk/server";
 import { A2AExpressApp } from "@a2a-js/sdk/server/express";
 
 import ClaudeCodeExecutor from "./executor";
+import { ClaudeA2AConfig } from "./types";
+import { loadConfig } from "./configLoader";
 
-export async function startServer(config: any) {
-  const port = config.server.port;
+export async function startServer(config: ClaudeA2AConfig) {
+  const port = config.server?.port || 3008;
 
   const store = new InMemoryTaskStore();
   const agentCard = buildAgentCard(config);
@@ -33,31 +35,30 @@ export async function startServer(config: any) {
  * @param config The config to build the agent card from.
  * @returns The agent card.
  */
-function buildAgentCard(config: any): AgentCard {
-  const port = config.server.port;
+function buildAgentCard(config: ClaudeA2AConfig): AgentCard {
+  const port = config.server?.port || 3008;
+  const host = config.server?.host || 'localhost';
+
   return {
-    name: config.agent?.name || "A2A Agent",
-    description: config.agent?.description || "An agent that serves as an A2A protocol agent.",
+    name: config.agentCard?.name || "A2A Agent",
+    description: config.agentCard?.description || "An agent that serves as an A2A protocol agent.",
     url: `http://localhost:${port}`,
-    provider: config.agent?.provider || { organization: "A2A Samples" },
-    version: config.agent?.version || "0.0.1",
+    provider: config.agentCard?.provider,
+    version: config.agentCard?.version || "0.0.1",
     capabilities: {
-      streaming: config.agent?.capabilities?.streaming ?? true,
-      pushNotifications: config.agent?.capabilities?.pushNotifications ?? false,
-      stateTransitionHistory: config.agent?.capabilities?.stateTransitionHistory ?? false,
+      streaming: config.agentCard?.capabilities?.streaming ?? true,
+      pushNotifications: config.agentCard?.capabilities?.pushNotifications ?? false,
+      stateTransitionHistory: config.agentCard?.capabilities?.stateTransitionHistory ?? false,
     },
-    // authentication: config.agent?.authentication ?? null,
-    defaultInputModes: config.agent?.defaultInputModes || ["text"],
-    defaultOutputModes: config.agent?.defaultOutputModes || ["text"],
-    skills: config.agent?.skills || [],
+    // authentication: config.agentCard?.authentication ?? null,
+    defaultInputModes: config.agentCard?.defaultInputModes || ["text"],
+    defaultOutputModes: config.agentCard?.defaultOutputModes || ["text"],
+    skills: config.agentCard?.skills || [],
     protocolVersion: "0.3.0",
   };
 }
 
-
-
-startServer({
-    server: {
-        port: 3008
-    }
-});
+// Load configuration from file or use defaults
+startServer(
+  loadConfig()
+);

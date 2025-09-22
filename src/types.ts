@@ -1,3 +1,4 @@
+import { AgentCard } from "@a2a-js/sdk";
 
 /**
  * Server configuration options.
@@ -12,10 +13,9 @@ export interface ServerConfig {
 /**
  * Main agent configuration schema.
  */
-export interface AgentConfig {
+export interface ClaudeA2AConfig {
   /** Server settings */
-  server: ServerConfig;
-  
-  /** Additional agent options (optional) */
-  [key: string]: any;
+  server?: ServerConfig;
+
+  agentCard?: AgentCard;
 }

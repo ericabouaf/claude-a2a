@@ -1,6 +1,6 @@
 {
   "name": "claude-a2a",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "A2A server wrapper around Claude Code SDK",
   "main": "dist/server.js",
   "bin": {
