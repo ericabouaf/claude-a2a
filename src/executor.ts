@@ -55,11 +55,8 @@ class ClaudeCodeExecutor implements AgentExecutor {
 
     private async startClaudeExecution(userText: string, a2aResponse: A2AResponse, claudeSessionId: string | undefined): Promise<string | null> {
 
-        const allowedTools = ["Write", "WebSearch", "Edit"];
-
         claudeLog('debug', `Starting claude execution`, {
           claudeSessionId,
-          allowedTools
         });
 
         const promptIteratorInstance = (async function* (): AsyncIterable<SDKUserMessage> {
@@ -83,7 +80,6 @@ class ClaudeCodeExecutor implements AgentExecutor {
         const messages = query({
             prompt: promptIteratorInstance,
             options: {
-                allowedTools,
                 resume: claudeSessionId,
                 hooks: {
                     PostToolUse: [{
@@ -120,6 +116,17 @@ class ClaudeCodeExecutor implements AgentExecutor {
 
             this.logClaudeMessage(message);
 
+            if (message.type === 'assistant') {
+              const msgContent = message.message.content;
+              if(msgContent.type === 'tool_use') {
+                  const toolName = msgContent.name;
+
+                  a2aResponse.publishStatusUpdateWorking(
+                    a2aResponse.buildTextMessage(`Calling tool ${toolName}`)
+                  );
+              }
+            }
+
             if (message.type === 'result') {
                 if ('result' in message) {
                   const claudeTextResponse = message.result;
@@ -142,7 +149,7 @@ class ClaudeCodeExecutor implements AgentExecutor {
   private logClaudeMessage(message: SDKMessage): void {
     switch (message.type) {
       case 'user':
-        claudeLog('in', '👤 User Message', message);
+        claudeLog('in', '👤 User Message', message.message);
         break;
         
       case 'assistant':
