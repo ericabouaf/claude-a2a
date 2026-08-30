@@ -1,24 +1,66 @@
 import {
     query,
     type Options,
+    type PermissionResult,
     type Query,
     type SDKMessage,
     type SDKUserMessage,
     type PostToolUseHookInput,
 } from '@anthropic-ai/claude-agent-sdk';
+import { Message, TaskState } from "@a2a-js/sdk";
 import { AgentExecutor, RequestContext, ExecutionEventBus } from "@a2a-js/sdk/server";
 import { TaskNotCancelableError } from "@a2a-js/sdk/errors";
 import path from 'path';
 import A2AResponse from './A2AResponse';
 import SessionStore from './sessionStore';
-import { TaskRegistry, type TaskEntry } from './taskRegistry';
+import { TaskRegistry, createDeferred, type PendingPrompt, type TaskEntry } from './taskRegistry';
 import { a2aLog, claudeLog } from './logger';
 import type { ClaudeConfig } from './types';
 
 /** How long `cancelTask` waits for `query.interrupt()` before aborting anyway. */
 const INTERRUPT_TIMEOUT_MS = 1500;
 
+/** Free-text answers accepted as "allow" for a permission prompt. */
+const AFFIRMATIVE = /^(yes|y|oui|ok|allow)$/i;
 
+/** Shape of the `AskUserQuestion` tool input we render and answer. */
+interface AskUserQuestion {
+    question: string;
+    header?: string;
+    options?: { label: string; description?: string }[];
+    multiSelect?: boolean;
+}
+
+/**
+ * Executes A2A tasks by running a Claude Agent SDK query per task.
+ *
+ * ## Interactive tasks
+ *
+ * A `canUseTool` callback turns anything Claude needs a human for —
+ * `AskUserQuestion`, or a tool permission the `permissionMode` did not
+ * auto-allow — into an A2A `input-required` status, and parks the query on the
+ * unresolved `canUseTool` promise. `execute()` then RETURNS while the query
+ * stays alive in the background.
+ *
+ * That works because of two things in
+ * `node_modules/@a2a-js/sdk/dist/server/index.js`:
+ *
+ * - `_runStreamExecutor` settles the bus in a `.finally()` on the `execute()`
+ *   promise, via `_settleBus(taskId, bus, lastPublishedState)`. `_settleBus`
+ *   returns *without* calling `eventBus.finished()` (and without
+ *   `cleanupByTaskId`) when the last published state is in
+ *   `keepBusAliveStates` — which defaults to `[INPUT_REQUIRED, AUTH_REQUIRED]`.
+ *   So the bus survives `execute()` resolving on an INPUT_REQUIRED status.
+ *   Hence: publish INPUT_REQUIRED *before* releasing the turn.
+ * - The follow-up turn carries the same `taskId`, so
+ *   `DefaultExecutionEventBusManager.createOrGetByTaskId(taskId)` hands the
+ *   handler that very same bus instance, and the still-running query loop keeps
+ *   publishing onto the stream the new turn is reading.
+ *
+ * The per-turn SSE stream still ends at INPUT_REQUIRED: `ExecutionEventQueue`
+ * stops on terminal states *and* on INPUT_REQUIRED. The bus outliving the queue
+ * is exactly what makes the next turn possible.
+ */
 class ClaudeCodeExecutor implements AgentExecutor {
 
     /** Claude Agent SDK settings, from `.claude/claude-a2a.config.json`. */
@@ -29,7 +71,7 @@ class ClaudeCodeExecutor implements AgentExecutor {
     /** Maps an A2A contextId to a Claude session id, persisted across restarts. */
     private readonly sessions: SessionStore;
 
-    /** A2A tasks currently running a Claude query, keyed by taskId. */
+    /** A2A tasks currently backed by a live Claude query, keyed by taskId. */
     private readonly running = new TaskRegistry();
 
     constructor(claudeConfig: ClaudeConfig = {}) {
@@ -42,12 +84,15 @@ class ClaudeCodeExecutor implements AgentExecutor {
         requestContext: RequestContext,
         eventBus: ExecutionEventBus
     ): Promise<void> {
-        const { taskId, contextId, userMessage } = requestContext;
-        // A2A v1.0: parts carry a `content` oneof discriminated by `$case`.
-        const firstTextPart = userMessage.parts?.find((part) => part.content?.$case === 'text');
-        const userText = firstTextPart?.content?.$case === 'text' ? firstTextPart.content.value : "";
+        const { taskId, contextId, userMessage, task: storedTask } = requestContext;
+        const { text: userText, data: userData } = readMessageParts(userMessage);
 
         a2aLog('in', `Request received (taskId: ${taskId}, contextId: ${contextId})`, {userText});
+
+        // A follow-up turn answering a parked question / permission prompt.
+        if (storedTask?.status?.state === TaskState.TASK_STATE_INPUT_REQUIRED) {
+            return this.answerParkedTask(requestContext, eventBus, userText, userData);
+        }
 
         const a2aResponse = new A2AResponse(requestContext, eventBus);
 
@@ -67,18 +112,64 @@ class ClaudeCodeExecutor implements AgentExecutor {
             abortController: new AbortController(),
             a2aResponse,
             canceled: false,
+            turn: createDeferred(),
         });
 
-        try {
-            const newClaudeSessionId = await this.startClaudeExecution(userText, entry, claudeSessionId);
+        // Detached on purpose: the query outlives this turn whenever it parks on
+        // a question. `runClaudeQuery` never rejects and always releases the turn.
+        void this.runClaudeQuery(userText, entry, claudeSessionId);
 
-            // Save claudeSessionId (mapped by A2A contextId) to re-use in future query calls
-            if (newClaudeSessionId) {
-                this.sessions.set(contextId, newClaudeSessionId);
-            }
-        } finally {
-            this.running.remove(taskId);
+        // The A2A turn stays open exactly as long as the agent is busy: until the
+        // query reaches a terminal state, or parks waiting for the client.
+        await entry.turn.promise;
+    }
+
+    /**
+     * Second (or later) turn on a task parked in `input-required`: hands the
+     * user's answer to the waiting `canUseTool` promise and waits for the query
+     * to either finish or park again.
+     */
+    private async answerParkedTask(
+        requestContext: RequestContext,
+        eventBus: ExecutionEventBus,
+        userText: string,
+        userData: Record<string, unknown> | undefined
+    ): Promise<void> {
+        const { taskId } = requestContext;
+        const a2aResponse = new A2AResponse(requestContext, eventBus);
+
+        // A2A requires a `task` (or `message`) as the first event of a stream.
+        a2aResponse.publishTaskResumed(requestContext.task);
+
+        const entry = this.running.get(taskId);
+        const pending = entry?.pendingPrompt;
+
+        if (!entry || !pending) {
+            // The stored task says "waiting for input" but no query is parked:
+            // the server was restarted, or the task was canceled meanwhile.
+            // Fail explicitly rather than hang the client forever.
+            a2aResponse.publishStatusUpdateFailed(
+                `Task ${taskId} is waiting for input, but the agent run behind it is gone `
+                + `(the server restarted, or the task was canceled). Please start a new task.`
+            );
+            a2aResponse.finished();
+            return;
         }
+
+        // Rebind to this turn's bus. In practice it is the very same instance
+        // (`createOrGetByTaskId`), but the running query must always publish
+        // onto the bus the current turn is draining.
+        entry.a2aResponse = a2aResponse;
+        entry.pendingPrompt = undefined;
+        // Re-arm the barrier BEFORE unblocking the query, otherwise the query
+        // could finish and release the previous (already settled) deferred.
+        entry.turn = createDeferred();
+
+        const result = buildPermissionResult(pending, userText, userData);
+        claudeLog('debug', `Answering parked ${pending.kind} for ${pending.toolName}`, result);
+        pending.resolve(result);
+
+        await entry.turn.promise;
     }
 
     /**
@@ -98,6 +189,8 @@ class ClaudeCodeExecutor implements AgentExecutor {
             model: this.claudeConfig.model,
             allowedTools: this.claudeConfig.allowedTools,
             maxTurns: this.claudeConfig.maxTurns,
+            canUseTool: (toolName, input, options) =>
+                this.handleToolPrompt(entry, toolName, input, options.title),
             hooks: {
                 PostToolUse: [{
                     hooks: [async (input, _toolUseID, _options) => {
@@ -121,7 +214,62 @@ class ClaudeCodeExecutor implements AgentExecutor {
         };
     }
 
-    private async startClaudeExecution(userText: string, entry: TaskEntry, claudeSessionId: string | undefined): Promise<string | null> {
+    /**
+     * `canUseTool`: everything Claude cannot decide on its own lands here.
+     *
+     * Publishes an `input-required` status carrying both a plain-language
+     * rendering and a `data` part the client can answer programmatically, then
+     * returns a promise that stays pending until the A2A client replies (or the
+     * task is canceled).
+     */
+    private handleToolPrompt(
+        entry: TaskEntry,
+        toolName: string,
+        input: Record<string, unknown>,
+        title: string | undefined
+    ): Promise<PermissionResult> {
+        if (entry.canceled) {
+            return Promise.resolve({ behavior: 'deny', message: 'Task canceled', interrupt: true });
+        }
+
+        const isQuestion = toolName === 'AskUserQuestion';
+        const policy = this.claudeConfig.permissionPrompts ?? 'input-required';
+
+        // `AskUserQuestion` is always bridged: it asks the user something, it
+        // does not grant a privilege. Only real permission prompts are gated.
+        if (!isQuestion && policy === 'deny') {
+            claudeLog('debug', `Denying permission prompt for ${toolName} (permissionPrompts: "deny")`);
+            return Promise.resolve({
+                behavior: 'deny',
+                message: `This agent cannot ask for permissions (claude.permissionPrompts is "deny"), `
+                    + `so ${toolName} was not allowed.`,
+            });
+        }
+
+        const kind: PendingPrompt['kind'] = isQuestion ? 'ask_user_question' : 'permission_request';
+        const { text, data } = isQuestion
+            ? renderQuestionPrompt(input)
+            : renderPermissionPrompt(toolName, input, title);
+
+        claudeLog('debug', `Parking task ${entry.taskId} on a ${kind} (${toolName})`);
+
+        return new Promise<PermissionResult>((resolve) => {
+            entry.pendingPrompt = { kind, toolName, input, resolve };
+            const a2aResponse = entry.a2aResponse;
+            // Publish first, release the turn second: the request handler reads
+            // the LAST state published on the bus when `execute()` resolves, and
+            // it must read INPUT_REQUIRED to keep the bus alive.
+            a2aResponse.publishStatusUpdateInputRequired(a2aResponse.buildPromptMessage(text, data));
+            entry.turn.resolve();
+        });
+    }
+
+    /**
+     * Runs one Claude query for a task, from the first prompt to the terminal
+     * A2A status. Detached from `execute()`, so it never rejects: failures are
+     * published as `TASK_STATE_FAILED`.
+     */
+    private async runClaudeQuery(userText: string, entry: TaskEntry, claudeSessionId: string | undefined): Promise<void> {
 
         claudeLog('debug', `Starting claude execution`, {
           claudeSessionId,
@@ -159,7 +307,6 @@ class ClaudeCodeExecutor implements AgentExecutor {
         // first message onwards.
         entry.query = messages;
 
-        const a2aResponse = entry.a2aResponse;
         let newClaudeSessionId: string | null = null;
         let failure: string | undefined;
 
@@ -182,8 +329,8 @@ class ClaudeCodeExecutor implements AgentExecutor {
                     if (block.type === 'tool_use') {
                         const toolName = block.name;
 
-                        a2aResponse.publishStatusUpdateWorking(
-                          a2aResponse.buildTextMessage(`Calling tool ${toolName}`)
+                        entry.a2aResponse.publishStatusUpdateWorking(
+                          entry.a2aResponse.buildTextMessage(`Calling tool ${toolName}`)
                         );
                     }
                   }
@@ -197,8 +344,8 @@ class ClaudeCodeExecutor implements AgentExecutor {
                       const claudeTextResponse = message.result;
 
                       // Sends claude response as working text message
-                      a2aResponse.publishStatusUpdateWorking(
-                        a2aResponse.buildTextMessage(claudeTextResponse)
+                      entry.a2aResponse.publishStatusUpdateWorking(
+                        entry.a2aResponse.buildTextMessage(claudeTextResponse)
                       );
                     }
 
@@ -220,25 +367,35 @@ class ClaudeCodeExecutor implements AgentExecutor {
             resolveDone!();
         }
 
-        // A canceled task already got its final CANCELED status from cancelTask;
-        // publishing anything else here would violate the task lifecycle.
-        if (entry.canceled) {
-            a2aLog('out', `Task ${entry.taskId} was canceled: no final status published here`);
-            return newClaudeSessionId;
+        try {
+            // Save claudeSessionId (mapped by A2A contextId) to re-use in future query calls
+            if (newClaudeSessionId) {
+                this.sessions.set(entry.contextId, newClaudeSessionId);
+            }
+
+            // A canceled task already got its final CANCELED status from cancelTask;
+            // publishing anything else here would violate the task lifecycle.
+            if (entry.canceled) {
+                a2aLog('out', `Task ${entry.taskId} was canceled: no final status published here`);
+                return;
+            }
+
+            if (failure) {
+                entry.a2aResponse.publishStatusUpdateFailed(failure);
+            } else {
+                entry.a2aResponse.publishStatusUpdateCompleted();
+            }
+
+            // The request handler's `_settleBus` closes the bus once `execute()`
+            // resolves on a terminal state, but the pre-existing behaviour of this
+            // executor was to close it itself; `finished()` is idempotent.
+            entry.a2aResponse.finished();
+        } finally {
+            this.running.remove(entry.taskId);
+            // Always last: the terminal status must be on the bus before the
+            // turn is released, so `_settleBus` sees it.
+            entry.turn.resolve();
         }
-
-        if (failure) {
-            a2aResponse.publishStatusUpdateFailed(failure);
-        } else {
-            a2aResponse.publishStatusUpdateCompleted();
-        }
-
-        // The request handler's `_settleBus` closes the bus once `execute()`
-        // resolves on a terminal state, but the pre-existing behaviour of this
-        // executor was to close it itself; `finished()` is idempotent.
-        a2aResponse.finished();
-
-        return newClaudeSessionId;
   }
 
 
@@ -325,8 +482,113 @@ class ClaudeCodeExecutor implements AgentExecutor {
     // what the handler's drain loop is waiting for.
     entry.a2aResponse.publishStatusUpdateCanceled();
 
+    // Released only now: waking a parked query earlier could let it publish
+    // (or settle the turn, and thus the bus) before CANCELED is on the wire.
+    const pending = entry.pendingPrompt;
+    if (pending) {
+      entry.pendingPrompt = undefined;
+      pending.resolve({ behavior: 'deny', message: 'Task canceled', interrupt: true });
+    }
+
     this.running.remove(taskId);
+    // Unblocks a follow-up `execute()` that was awaiting this task's turn.
+    entry.turn.resolve();
   };
+}
+
+/** Reads the first text part and the first structured `data` part of a message. */
+function readMessageParts(message: Message): { text: string; data: Record<string, unknown> | undefined } {
+    let text = '';
+    let data: Record<string, unknown> | undefined;
+
+    for (const part of message.parts ?? []) {
+        // A2A v1.0: parts carry a `content` oneof discriminated by `$case`.
+        if (part.content?.$case === 'text' && !text) {
+            text = part.content.value;
+        } else if (part.content?.$case === 'data' && !data) {
+            const value = part.content.value;
+            if (value && typeof value === 'object' && !Array.isArray(value)) {
+                data = value as Record<string, unknown>;
+            }
+        }
+    }
+
+    return { text, data };
+}
+
+/** Renders an `AskUserQuestion` input as plain language + a machine readable part. */
+function renderQuestionPrompt(input: Record<string, unknown>): { text: string; data: unknown } {
+    const questions = (Array.isArray(input.questions) ? input.questions : []) as AskUserQuestion[];
+
+    const rendered = questions.map((question, index) => {
+        const prefix = questions.length > 1 ? `${index + 1}. ` : '';
+        const options = (question.options ?? []).map((option) => {
+            const description = option.description ? ` — ${option.description}` : '';
+            return `  - ${option.label}${description}`;
+        });
+        const multi = question.multiSelect ? ' (several answers allowed)' : '';
+        return [`${prefix}${question.question}${multi}`, ...options].join('\n');
+    });
+
+    const text = [
+        questions.length > 1 ? 'Claude needs answers before it can continue:' : 'Claude needs an answer before it can continue:',
+        ...rendered,
+        'Reply on this task with the option you pick (free text works).',
+    ].join('\n\n');
+
+    return { text, data: { kind: 'ask_user_question', questions } };
+}
+
+/** Renders a tool permission request as plain language + a machine readable part. */
+function renderPermissionPrompt(
+    toolName: string,
+    input: Record<string, unknown>,
+    title: string | undefined
+): { text: string; data: unknown } {
+    return {
+        text: `Claude wants to use ${title ?? toolName}. Reply "yes" to allow or anything else to deny.`,
+        data: { kind: 'permission_request', toolName, input, title },
+    };
+}
+
+/** Turns the client's reply into the `PermissionResult` the parked query expects. */
+function buildPermissionResult(
+    pending: PendingPrompt,
+    userText: string,
+    userData: Record<string, unknown> | undefined
+): PermissionResult {
+    if (pending.kind === 'ask_user_question') {
+        return {
+            behavior: 'allow',
+            updatedInput: { ...pending.input, answers: buildAnswers(pending, userText, userData) },
+        };
+    }
+
+    if (AFFIRMATIVE.test(userText.trim())) {
+        return { behavior: 'allow', updatedInput: pending.input };
+    }
+
+    return { behavior: 'deny', message: userText || 'Denied by the A2A client.' };
+}
+
+/**
+ * `AskUserQuestion` expects its answers keyed by question text. A client can
+ * send them structured (`data: { answers: { … } }`); otherwise the free text of
+ * the reply is taken as the answer to the first (usually only) question.
+ */
+function buildAnswers(
+    pending: PendingPrompt,
+    userText: string,
+    userData: Record<string, unknown> | undefined
+): Record<string, string> {
+    const provided = userData?.answers;
+    if (provided && typeof provided === 'object' && !Array.isArray(provided)) {
+        return provided as Record<string, string>;
+    }
+
+    const questions = (Array.isArray(pending.input.questions) ? pending.input.questions : []) as AskUserQuestion[];
+    const first = questions[0]?.question;
+    return first ? { [first]: userText } : {};
 }
 
 export default ClaudeCodeExecutor;

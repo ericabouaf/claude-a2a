@@ -116,6 +116,7 @@ The optional `claude` block is forwarded to the Claude Agent SDK `query()`:
 | `allowedTools` | SDK default | Tools usable without a permission prompt. |
 | `settingSources` | `["user", "project", "local"]` | The Agent SDK loads **no** settings source by default: without this, `CLAUDE.md`, `settings.json` and project slash commands are ignored. The default above restores the `claude` CLI behaviour. |
 | `maxTurns` | unlimited | Hard cap on agent turns per task. |
+| `permissionPrompts` | `"input-required"` | What to do with a tool permission prompt `permissionMode` did not auto-allow: bridge it to the client (see below) or `"deny"` it outright. |
 
 ## Session persistence
 
@@ -123,6 +124,62 @@ The `A2A contextId -> Claude session_id` map is written to
 `<cwd>/.claude/claude-a2a.sessions.json` (atomically, on every change) and
 reloaded at startup, so restarting the server does not break the continuity of
 ongoing A2A conversations. The file is local state: keep it out of git.
+
+## Interactive tasks (input-required)
+
+When Claude needs the human — it calls `AskUserQuestion`, or a tool needs a
+permission the `permissionMode` does not auto-allow — the task moves to
+`TASK_STATE_INPUT_REQUIRED` instead of blocking or failing. The Claude query
+stays alive in the background while the A2A turn ends, and the next message
+carrying the same `taskId` resumes it.
+
+The `input-required` status message carries two parts: a `text` part rendering
+the prompt in plain language, and an `application/json` `data` part for clients
+that want to answer programmatically.
+
+A question (`AskUserQuestion`):
+
+```json
+{
+  "kind": "ask_user_question",
+  "questions": [
+    {
+      "question": "Which colour do you prefer?",
+      "header": "Colour",
+      "options": [
+        { "label": "red", "description": "Choose red" },
+        { "label": "blue", "description": "Choose blue" }
+      ],
+      "multiSelect": false
+    }
+  ]
+}
+```
+
+A permission request:
+
+```json
+{
+  "kind": "permission_request",
+  "toolName": "Bash",
+  "input": { "command": "rm -rf build" },
+  "title": "Claude wants to run `rm -rf build`"
+}
+```
+
+### Answering
+
+Send another message on the **same `taskId`** (and `contextId`):
+
+- **Free text** — for a question, the text is taken as the answer to the first
+  question; for a permission request, `yes` / `y` / `oui` / `ok` / `allow`
+  (case-insensitive) allows it and anything else denies it, the text becoming
+  the denial reason handed back to Claude.
+- **Structured** — add a `data` part `{ "answers": { "<question text>": "<label>" } }`
+  to answer several questions at once.
+
+Cancelling a task parked in `input-required` works as usual: the pending
+question is denied and the task ends `canceled`.
 
 ## Cancellation
 

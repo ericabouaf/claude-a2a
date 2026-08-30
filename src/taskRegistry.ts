@@ -1,10 +1,38 @@
-import type { Query } from '@anthropic-ai/claude-agent-sdk';
+import type { PermissionResult, Query } from '@anthropic-ai/claude-agent-sdk';
 import type A2AResponse from './A2AResponse';
+
+/** A promise plus the function that settles it. */
+export interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+}
+
+export function createDeferred<T = void>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
+/**
+ * A tool call parked in `canUseTool`, waiting for the A2A client to answer.
+ *
+ * `AskUserQuestion` is bridged as a question; anything else that reaches
+ * `canUseTool` is a permission prompt the `permissionMode` did not auto-allow.
+ */
+export interface PendingPrompt {
+  kind: 'ask_user_question' | 'permission_request';
+  toolName: string;
+  /** The tool input as Claude proposed it. */
+  input: Record<string, unknown>;
+  /** Settles the `canUseTool` promise, unblocking the Claude query. */
+  resolve: (result: PermissionResult) => void;
+}
 
 /**
  * Everything the executor needs to keep hold of while an A2A task is running:
- * the live Claude query (to interrupt it), its abort controller, and the
- * response helper bound to the task's event bus (to publish the final state).
+ * the live Claude query (to interrupt it), its abort controller, the response
+ * helper bound to the task's event bus, and — when the task is parked in
+ * `input-required` — the tool call waiting for an answer.
  */
 export interface TaskEntry {
   taskId: string;
@@ -20,14 +48,24 @@ export interface TaskEntry {
    * once a task is canceled, CANCELED is the only status it may end on.
    */
   canceled: boolean;
+  /** Set while the task is parked in `input-required`. */
+  pendingPrompt?: PendingPrompt;
+  /**
+   * Released when the current A2A turn is over: either the Claude query reached
+   * a terminal state, or it parked on a question. `execute()` awaits it, which
+   * is what keeps the A2A turn open exactly as long as the agent is busy.
+   * Re-armed at the start of every follow-up turn.
+   */
+  turn: Deferred<void>;
 }
 
 /**
- * Registry of the A2A tasks currently executing a Claude query.
+ * Registry of the A2A tasks currently backed by a live Claude query.
  *
  * An entry exists from the moment `execute()` starts a query until the query
- * loop reaches a terminal state (completed / failed) or the task is canceled.
- * `cancelTask` uses it to find the query to interrupt.
+ * loop reaches a terminal state (completed / failed) or the task is canceled —
+ * including while the task sits parked in `input-required`, which is precisely
+ * what lets a follow-up turn find the pending question to answer.
  */
 export class TaskRegistry {
   private readonly entries = new Map<string, TaskEntry>();

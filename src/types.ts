@@ -76,4 +76,16 @@ export interface ClaudeConfig {
   settingSources?: SettingSource[];
   /** Hard cap on agent turns for a single task. */
   maxTurns?: number;
+  /**
+   * What to do with a tool permission prompt the `permissionMode` did not
+   * auto-allow: bridge it to the A2A client as `input-required` (default), or
+   * deny it outright so the task never blocks.
+   *
+   * `AskUserQuestion` is always bridged: it is a question for the user, not a
+   * privilege grant.
+   */
+  permissionPrompts?: PermissionPromptPolicy;
 }
+
+/** @see ClaudeConfig.permissionPrompts */
+export type PermissionPromptPolicy = 'input-required' | 'deny';

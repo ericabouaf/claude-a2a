@@ -1,4 +1,4 @@
-import { Message, Part, Role, TaskState } from "@a2a-js/sdk";
+import { Message, Part, Role, Task, TaskState } from "@a2a-js/sdk";
 import { AgentEvent, AgentExecutionEvent, ExecutionEventBus, RequestContext } from "@a2a-js/sdk/server";
 import { randomUUID } from "node:crypto";
 import { a2aLog } from './logger';
@@ -10,6 +10,16 @@ function buildTextPart(text: string): Part {
         metadata: undefined,
         filename: '',
         mediaType: 'text/plain',
+    };
+}
+
+/** Builds an A2A v1.0 structured `data` `Part`. */
+function buildDataPart(value: unknown): Part {
+    return {
+        content: { $case: 'data', value },
+        metadata: undefined,
+        filename: '',
+        mediaType: 'application/json',
     };
 }
 
@@ -122,6 +132,61 @@ class A2AResponse {
             },
             metadata: undefined,
         }));
+    }
+
+    /**
+     * Publishes the non-final `input-required` state: the task parks until the
+     * client sends another message carrying the same `taskId`.
+     *
+     * INPUT_REQUIRED is in the handler's default `keepBusAliveStates`, so the
+     * event bus survives `execute()` returning and the follow-up turn reuses it.
+     */
+    public publishStatusUpdateInputRequired(message: Message) {
+        a2aLog('out', 'status-update input-required');
+        this.publish(AgentEvent.statusUpdate({
+            taskId: this.taskId,
+            contextId: this.contextId,
+            status: {
+                state: TaskState.TASK_STATE_INPUT_REQUIRED,
+                message,
+                timestamp: new Date().toISOString(),
+            },
+            metadata: undefined,
+        }));
+    }
+
+    /**
+     * Re-opens a parked task: republishes it in the `working` state.
+     *
+     * A2A requires the first event of any stream to be a `task` or a `message`
+     * (`DefaultRequestHandler._advanceStreamPattern` throws otherwise), so this
+     * is what a follow-up turn on an input-required task must publish first.
+     * Artifacts and history are carried over from the stored task.
+     */
+    public publishTaskResumed(storedTask: Task | undefined) {
+        a2aLog('out', 'Task resumed event (working)');
+        this.publish(AgentEvent.task({
+            id: this.taskId,
+            contextId: this.contextId,
+            status: {
+                state: TaskState.TASK_STATE_WORKING,
+                message: undefined,
+                timestamp: new Date().toISOString(),
+            },
+            artifacts: storedTask?.artifacts ?? [],
+            history: storedTask?.history ?? [],
+            metadata: storedTask?.metadata,
+        }));
+    }
+
+    /**
+     * Builds an agent message carrying both a human readable rendering and the
+     * machine readable payload a client needs to answer programmatically.
+     */
+    public buildPromptMessage(text: string, data: unknown): Message {
+        const message = this.buildTextMessage(text);
+        message.parts = [...message.parts, buildDataPart(data)];
+        return message;
     }
 
     /**
