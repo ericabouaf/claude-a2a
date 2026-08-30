@@ -51,6 +51,22 @@ export interface TaskEntry {
   /** Set while the task is parked in `input-required`. */
   pendingPrompt?: PendingPrompt;
   /**
+   * Permission prompts the client already refused on this task, keyed by
+   * `permissionKey(toolName, input)` and counted.
+   *
+   * This is the loop breaker: a key already in this map must never round-trip
+   * to the user a second time — Claude re-asking for a permission it was just
+   * refused is what turned a single "no" into an infinite conversation.
+   */
+  deniedPrompts: Map<string, number>;
+  /**
+   * Set when the run must end in `failed` rather than in whatever Claude
+   * reports: a repeated denied permission, or the denial cap being reached.
+   * Read once by the query loop, which then publishes exactly this message as
+   * the single terminal status.
+   */
+  stopReason?: string;
+  /**
    * Released when the current A2A turn is over: either the Claude query reached
    * a terminal state, or it parked on a question. `execute()` awaits it, which
    * is what keeps the A2A turn open exactly as long as the agent is busy.
@@ -82,6 +98,7 @@ export class TaskRegistry {
   public remove(taskId: string): void {
     this.entries.delete(taskId);
   }
+
 
   public get size(): number {
     return this.entries.size;

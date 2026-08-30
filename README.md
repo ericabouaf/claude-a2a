@@ -157,7 +157,8 @@ The optional `claude` block is forwarded to the Claude Agent SDK `query()`:
     "model": "claude-sonnet-4-5",
     "allowedTools": ["Read", "Write", "Edit"],
     "settingSources": ["user", "project", "local"],
-    "maxTurns": 20
+    "maxTurns": 20,
+    "maxPermissionDenials": 3
   }
 }
 ```
@@ -171,6 +172,7 @@ The optional `claude` block is forwarded to the Claude Agent SDK `query()`:
 | `settingSources` | `["user", "project", "local"]` | The Agent SDK loads **no** settings source by default: without this, `CLAUDE.md`, `settings.json` and project slash commands are ignored. The default above restores the `claude` CLI behaviour. |
 | `maxTurns` | unlimited | Hard cap on agent turns per task. |
 | `permissionPrompts` | `"input-required"` | What to do with a tool permission prompt `permissionMode` did not auto-allow: bridge it to the client (see below) or `"deny"` it outright. |
+| `maxPermissionDenials` | `3` | Permission denials a single task may collect before it is stopped. See [loop protection](#loop-protection). |
 
 ## Session persistence
 
@@ -228,14 +230,64 @@ A permission request — text part:
 
 ### Answering
 
-Send another message on the **same `taskId`** (and `contextId`):
+Send another message on the **same `taskId`** (and `contextId`). A structured
+`data` part always wins over the text part.
 
-- **Free text** — for a question, the text is taken as the answer to the first
-  question; for a permission request, `yes` / `y` / `oui` / `ok` / `allow`
-  (case-insensitive) allows it and anything else denies it, the text becoming
-  the denial reason handed back to Claude.
-- **Structured** — add a `data` part `{ "answers": { "<question text>": "<label>" } }`
+#### Answering a question (`ask_user_question`)
+
+- **Free text** — taken as the answer to the first (usually only) question.
+- **Structured** — `data` part `{ "answers": { "<question text>": "<label>" } }`,
   to answer several questions at once.
+
+#### Answering a permission request (`permission_request`)
+
+- **Structured** — `data` part:
+
+  ```json
+  { "kind": "permission_response", "decision": "deny", "reason": "no writes outside the repo" }
+  ```
+
+  `decision` is `"allow"` or `"deny"`; `reason` is optional and only used on a
+  deny. This is the unambiguous form, and the one an app should send.
+
+- **Free text** — tolerant, because humans do not answer in enum values. The
+  reply is lowercased, split into words (punctuation stripped from the edges,
+  but `-` and `'` kept inside a word), and for a reply of **8 words or fewer**:
+
+  | | |
+  |---|---|
+  | allow | a word from `yes`, `y`, `oui`, `ok`, `okay`, `sure`, `allow`, `go`, `vas-y`, `d'accord`, `autorise` is present **and** no deny word is |
+  | deny | a word from `no`, `non`, `deny`, `refuse`, `nope`, `stop`, `cancel`, `annule`, `jamais` is present |
+
+  So `Yes.`, `ok go ahead` and `oui, vas-y` all allow; `ok but no` denies.
+  Anything ambiguous — and any reply longer than 8 words — is **denied**, on
+  the principle that a privilege is granted explicitly or not at all. The
+  denial then carries a reason saying the reply was not a clear yes or no,
+  rather than echoing the user's words back at Claude.
+
+#### Loop protection
+
+A denial handed to Claude reads:
+
+> The user denied this action (*reason*). Do not request the same permission
+> again; pick another approach or finish the task and explain.
+
+Without that second sentence Claude treats the reason as feedback on the
+attempt and immediately asks for the *same* permission again — which
+round-trips to the client forever. Two backstops make that unrecoverable-loop
+impossible even if the model ignores the instruction:
+
+- **Same request twice.** Every denial is recorded per task under
+  `toolName + JSON.stringify(input)`. If Claude asks for a key that was already
+  refused, the server does **not** ask the client again: it denies with
+  `interrupt: true` and the task ends `failed` with
+  `Stopped: Claude requested the same denied permission again (<tool>)`.
+- **Too many denials.** Once a task reaches `claude.maxPermissionDenials`
+  denials (default 3, any keys), that last denial also carries
+  `interrupt: true` and the task ends `failed` with an explanatory message.
+
+In both cases exactly one terminal status is published, and its message says
+why the task stopped — not whatever the interrupted Claude run reported.
 
 Cancelling a task parked in `input-required` works as usual: the pending
 question is denied and the task ends `canceled`.
@@ -282,6 +334,27 @@ Republishing the task in a non-terminal, non-`working` state is safe:
 the task: the server calls `query.interrupt()`, aborts the query, and publishes
 a final `TASK_STATE_CANCELED` status update. A task that is not running on this
 server is rejected with `TaskNotCancelable`.
+
+## Tests
+
+`npm run smoke` runs the unit tests plus every end-to-end smoke against a
+server that must already be running (`A2A_URL`, default `http://localhost:3008`):
+
+| script | what it covers |
+|---|---|
+| `npm run test:unit` | the permission-answer decision table (no server, no Claude call) |
+| `npm run smoke:v1` | a plain single-turn task |
+| `npm run smoke:cancel` | `CancelTask` on a running task |
+| `npm run smoke:input` | `AskUserQuestion` bridged to `input-required`, and the resume |
+| `npm run smoke:permission` | a structured `permission_response` deny beats a contradicting `yes` and stops the loop; `oui, vas-y` allows |
+
+```bash
+A2A_URL=http://localhost:3018 npm run smoke
+```
+
+`smoke:permission` writes into a temporary directory outside the server's `cwd`
+(override with `SMOKE_DIR`), because that is what `permissionMode: "acceptEdits"`
+does not auto-allow — which is how the permission prompt is triggered at all.
 
 ## Features
 

@@ -10,10 +10,12 @@
     "dist": "npx tsc -p tsconfig.cli.json",
     "dev": "tsx src/server.ts",
     "typecheck": "tsc --noEmit",
+    "test:unit": "node --no-warnings=MODULE_TYPELESS_PACKAGE_JSON --test scripts/permission-decision.test.mjs",
     "smoke:v1": "node scripts/smoke-v1.mjs",
     "smoke:cancel": "node scripts/smoke-cancel.mjs",
     "smoke:input": "node scripts/smoke-input-required.mjs",
-    "smoke": "npm run smoke:v1 && npm run smoke:cancel && npm run smoke:input"
+    "smoke:permission": "node scripts/smoke-permission.mjs",
+    "smoke": "npm run test:unit && npm run smoke:v1 && npm run smoke:cancel && npm run smoke:input && npm run smoke:permission"
   },
   "keywords": [
     "a2a",

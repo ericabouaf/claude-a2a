@@ -95,6 +95,16 @@ export interface ClaudeConfig {
    * privilege grant.
    */
   permissionPrompts?: PermissionPromptPolicy;
+  /**
+   * How many permission denials a single task may collect before it is
+   * stopped. Defaults to 3.
+   *
+   * Reaching the cap denies with `interrupt: true` and ends the task `failed`,
+   * so a client that keeps saying no cannot be walked around the same wall
+   * forever. Independent of the same-request protection, which stops the task
+   * the first time Claude re-asks for a permission that was already refused.
+   */
+  maxPermissionDenials?: number;
 }
 
 /** @see ClaudeConfig.permissionPrompts */

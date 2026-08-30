@@ -16,13 +16,19 @@ import SessionStore from './sessionStore';
 import { TaskRegistry, createDeferred, type PendingPrompt, type TaskEntry } from './taskRegistry';
 import { a2aLog, claudeLog } from './logger';
 import { readCaller } from './caller';
+import {
+    denialMessage,
+    permissionKey,
+    readPermissionAnswer,
+    stoppingDenialMessage,
+} from './permissionAnswer';
 import type { ClaudeConfig } from './types';
 
 /** How long `cancelTask` waits for `query.interrupt()` before aborting anyway. */
 const INTERRUPT_TIMEOUT_MS = 1500;
 
-/** Free-text answers accepted as "allow" for a permission prompt. */
-const AFFIRMATIVE = /^(yes|y|oui|ok|allow)$/i;
+/** Denials a single task may collect before it is stopped. @see ClaudeConfig.maxPermissionDenials */
+const DEFAULT_MAX_PERMISSION_DENIALS = 3;
 
 /** Shape of the `AskUserQuestion` tool input we render and answer. */
 interface AskUserQuestion {
@@ -117,6 +123,7 @@ class ClaudeCodeExecutor implements AgentExecutor {
             abortController: new AbortController(),
             a2aResponse,
             canceled: false,
+            deniedPrompts: new Map(),
             turn: createDeferred(),
         });
 
@@ -177,11 +184,65 @@ class ClaudeCodeExecutor implements AgentExecutor {
         // could finish and release the previous (already settled) deferred.
         entry.turn = createDeferred();
 
-        const result = buildPermissionResult(pending, userText, userData);
+        const result = this.buildPermissionResult(entry, pending, userText, userData);
         claudeLog('debug', `Answering parked ${pending.kind} for ${pending.toolName}`, result);
         pending.resolve(result);
 
         await entry.turn.promise;
+    }
+
+    /** Denials allowed on one task before the run is stopped. */
+    private get maxPermissionDenials(): number {
+        return this.claudeConfig.maxPermissionDenials ?? DEFAULT_MAX_PERMISSION_DENIALS;
+    }
+
+    /**
+     * Turns the client's reply into the `PermissionResult` the parked query
+     * expects, and keeps the per-task denial record up to date.
+     *
+     * `AskUserQuestion` is unconditionally allowed (the answer IS the point).
+     * A permission prompt goes through {@link readPermissionAnswer}: structured
+     * first, tolerant free text second, anything unclear denied with a reason.
+     *
+     * Every denial is recorded under its {@link permissionKey} so a repeat of
+     * the same request can be auto-denied in `handleToolPrompt` without ever
+     * bothering the user again, and counted against
+     * `claude.maxPermissionDenials` — the last allowed denial carries
+     * `interrupt: true` and stops the run.
+     */
+    private buildPermissionResult(
+        entry: TaskEntry,
+        pending: PendingPrompt,
+        userText: string,
+        userData: Record<string, unknown> | undefined
+    ): PermissionResult {
+        if (pending.kind === 'ask_user_question') {
+            return {
+                behavior: 'allow',
+                updatedInput: { ...pending.input, answers: buildAnswers(pending, userText, userData) },
+            };
+        }
+
+        const answer = readPermissionAnswer(userText, userData);
+        if (answer.decision === 'allow') {
+            return { behavior: 'allow', updatedInput: pending.input };
+        }
+
+        const key = permissionKey(pending.toolName, pending.input);
+        entry.deniedPrompts.set(key, (entry.deniedPrompts.get(key) ?? 0) + 1);
+
+        const denials = countDenials(entry);
+        if (denials >= this.maxPermissionDenials) {
+            entry.stopReason = `Stopped: the permission denial limit `
+                + `(claude.maxPermissionDenials = ${this.maxPermissionDenials}) was reached on this task.`;
+            return {
+                behavior: 'deny',
+                message: stoppingDenialMessage(answer.reason, entry.stopReason),
+                interrupt: true,
+            };
+        }
+
+        return { behavior: 'deny', message: denialMessage(answer.reason) };
     }
 
     /**
@@ -258,6 +319,23 @@ class ClaudeCodeExecutor implements AgentExecutor {
                 message: `This agent cannot ask for permissions (claude.permissionPrompts is "deny"), `
                     + `so ${toolName} was not allowed.`,
             });
+        }
+
+        // Loop breaker. The client already refused this exact call; asking it
+        // again is the round-trip storm this whole mechanism exists to stop, so
+        // the answer is decided here and the run is ended rather than parked.
+        if (!isQuestion) {
+            const key = permissionKey(toolName, input);
+            if (entry.deniedPrompts.has(key)) {
+                entry.stopReason =
+                    `Stopped: Claude requested the same denied permission again (${toolName}).`;
+                claudeLog('error', entry.stopReason);
+                return Promise.resolve({
+                    behavior: 'deny',
+                    message: `${entry.stopReason} The user already refused this exact call; it will not be asked again.`,
+                    interrupt: true,
+                });
+            }
         }
 
         const kind: PendingPrompt['kind'] = isQuestion ? 'ask_user_question' : 'permission_request';
@@ -409,7 +487,24 @@ class ClaudeCodeExecutor implements AgentExecutor {
                 return;
             }
 
-            if (failure) {
+            // Exactly ONE terminal status is published here, and `stopReason`
+            // wins over whatever Claude reported.
+            //
+            // What `interrupt: true` on a deny actually does to the query
+            // stream, observed against @anthropic-ai/claude-agent-sdk 0.3:
+            // the CLI answers the tool call with its own canned rejection text
+            // (`is_error: true`) INSTEAD of the `message` we passed, injects a
+            // synthetic user message `[Request interrupted by user]`, then ends
+            // the query with a `result` message of subtype
+            // `error_during_execution` carrying no `result` text. (A plain deny
+            // without `interrupt` is the opposite: our `message` is delivered
+            // verbatim as the tool_result, which is what makes the "do not ask
+            // again" instruction land.) So on the interrupt path the only
+            // usable explanation is the one we kept ourselves.
+            if (entry.stopReason) {
+                a2aLog('out', `Task ${entry.taskId} stopped: ${entry.stopReason}`, { claudeReported: failure });
+                entry.a2aResponse.publishStatusUpdateFailed(entry.stopReason);
+            } else if (failure) {
                 entry.a2aResponse.publishStatusUpdateFailed(failure);
             } else {
                 entry.a2aResponse.publishStatusUpdateCompleted();
@@ -578,24 +673,11 @@ function renderPermissionPrompt(
     };
 }
 
-/** Turns the client's reply into the `PermissionResult` the parked query expects. */
-function buildPermissionResult(
-    pending: PendingPrompt,
-    userText: string,
-    userData: Record<string, unknown> | undefined
-): PermissionResult {
-    if (pending.kind === 'ask_user_question') {
-        return {
-            behavior: 'allow',
-            updatedInput: { ...pending.input, answers: buildAnswers(pending, userText, userData) },
-        };
-    }
-
-    if (AFFIRMATIVE.test(userText.trim())) {
-        return { behavior: 'allow', updatedInput: pending.input };
-    }
-
-    return { behavior: 'deny', message: userText || 'Denied by the A2A client.' };
+/** Total number of permission denials recorded on a task. */
+function countDenials(entry: TaskEntry): number {
+    let total = 0;
+    for (const count of entry.deniedPrompts.values()) total += count;
+    return total;
 }
 
 /**
