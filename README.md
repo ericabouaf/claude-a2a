@@ -91,6 +91,46 @@ working directory:
 `server.publicUrl` is the URL advertised in the agent card's
 `supportedInterfaces`; it defaults to `http://localhost:<port>`.
 
+### Claude options
+
+The optional `claude` block is forwarded to the Claude Agent SDK `query()`:
+
+```json
+{
+  "claude": {
+    "cwd": "/path/to/the/agent/workspace",
+    "permissionMode": "acceptEdits",
+    "model": "claude-sonnet-4-5",
+    "allowedTools": ["Read", "Write", "Edit"],
+    "settingSources": ["user", "project", "local"],
+    "maxTurns": 20
+  }
+}
+```
+
+| Key | Default | Notes |
+|---|---|---|
+| `cwd` | `process.cwd()` | Working directory for Claude; also where the session file lives. |
+| `permissionMode` | `"acceptEdits"` | `default`, `acceptEdits`, `bypassPermissions`, `plan`, … |
+| `model` | SDK default | Model id. |
+| `allowedTools` | SDK default | Tools usable without a permission prompt. |
+| `settingSources` | `["user", "project", "local"]` | The Agent SDK loads **no** settings source by default: without this, `CLAUDE.md`, `settings.json` and project slash commands are ignored. The default above restores the `claude` CLI behaviour. |
+| `maxTurns` | unlimited | Hard cap on agent turns per task. |
+
+## Session persistence
+
+The `A2A contextId -> Claude session_id` map is written to
+`<cwd>/.claude/claude-a2a.sessions.json` (atomically, on every change) and
+reloaded at startup, so restarting the server does not break the continuity of
+ongoing A2A conversations. The file is local state: keep it out of git.
+
+## Cancellation
+
+`tasks/cancel` (v0.3) / `CancelTask` (v1.0) interrupts the Claude query backing
+the task: the server calls `query.interrupt()`, aborts the query, and publishes
+a final `TASK_STATE_CANCELED` status update. A task that is not running on this
+server is rejected with `TaskNotCancelable`.
+
 ## Features
 
 - Response streaming support

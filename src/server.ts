@@ -19,7 +19,7 @@ export async function startServer(config: ClaudeA2AConfig) {
   const store = new InMemoryTaskStore();
   const agentCard = buildAgentCard(config);
 
-  const claudeCodeExecutor = new ClaudeCodeExecutor();
+  const claudeCodeExecutor = new ClaudeCodeExecutor(config.claude ?? {});
 
   const requestHandler = new DefaultRequestHandler(agentCard, store, claudeCodeExecutor);
 

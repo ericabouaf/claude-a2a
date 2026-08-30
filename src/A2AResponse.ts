@@ -87,6 +87,44 @@ class A2AResponse {
     }
 
     /**
+     * Publishes the final `canceled` state.
+     *
+     * The A2A `DefaultRequestHandler.cancelTask` does NOT publish this itself
+     * when an event bus exists for the task: it calls
+     * `agentExecutor.cancelTask(taskId, eventBus)`, drains the bus, then
+     * reloads the task and throws `TaskNotCancelableError` unless the stored
+     * state is CANCELED. Publishing it here is what makes the RPC succeed.
+     */
+    public publishStatusUpdateCanceled() {
+        a2aLog('out', 'status-update canceled (FINAL)');
+        this.publish(AgentEvent.statusUpdate({
+            taskId: this.taskId,
+            contextId: this.contextId,
+            status: {
+                state: TaskState.TASK_STATE_CANCELED,
+                message: this.buildTextMessage('Task canceled.'),
+                timestamp: new Date().toISOString(),
+            },
+            metadata: undefined,
+        }));
+    }
+
+    /** Publishes the final `failed` state, carrying the error text. */
+    public publishStatusUpdateFailed(messageText: string) {
+        a2aLog('out', 'status-update failed (FINAL)', messageText);
+        this.publish(AgentEvent.statusUpdate({
+            taskId: this.taskId,
+            contextId: this.contextId,
+            status: {
+                state: TaskState.TASK_STATE_FAILED,
+                message: this.buildTextMessage(messageText),
+                timestamp: new Date().toISOString(),
+            },
+            metadata: undefined,
+        }));
+    }
+
+    /**
      * Publishes a whole text file as a single-chunk artifact.
      * The artifact id doubles as its human readable name (the filename).
      */

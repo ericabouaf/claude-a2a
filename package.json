@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "smoke:v03": "node scripts/smoke-v03.mjs",
     "smoke:v1": "node scripts/smoke-v1.mjs",
-    "smoke": "npm run smoke:v03 && npm run smoke:v1"
+    "smoke:cancel": "node scripts/smoke-cancel.mjs",
+    "smoke": "npm run smoke:v03 && npm run smoke:v1 && npm run smoke:cancel"
   },
   "keywords": [
     "a2a",

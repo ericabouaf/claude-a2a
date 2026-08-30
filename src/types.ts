@@ -1,4 +1,5 @@
 import { AgentProvider, AgentSkill } from "@a2a-js/sdk";
+import type { PermissionMode, SettingSource } from "@anthropic-ai/claude-agent-sdk";
 
 /**
  * Server configuration options.
@@ -49,4 +50,30 @@ export interface ClaudeA2AConfig {
   server?: ServerConfig;
 
   agentCard?: AgentCardConfig;
+
+  /** Claude Agent SDK settings */
+  claude?: ClaudeConfig;
+}
+
+/**
+ * Claude Agent SDK options exposed through the config file.
+ * Everything here is forwarded to `query({ options })`.
+ */
+export interface ClaudeConfig {
+  /** Working directory for Claude. Defaults to `process.cwd()`. */
+  cwd?: string;
+  /** Permission mode for tool use. Defaults to `'acceptEdits'`. */
+  permissionMode?: PermissionMode;
+  /** Model id (e.g. "claude-sonnet-4-5"). Defaults to the SDK default. */
+  model?: string;
+  /** Tools Claude may use without a permission prompt. */
+  allowedTools?: string[];
+  /**
+   * Which settings layers the Agent SDK loads (CLAUDE.md, settings.json,
+   * slash commands…). The SDK loads NONE of them by default; this server
+   * defaults to `['user', 'project', 'local']` to restore the CLI behaviour.
+   */
+  settingSources?: SettingSource[];
+  /** Hard cap on agent turns for a single task. */
+  maxTurns?: number;
 }
