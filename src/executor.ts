@@ -9,7 +9,7 @@ import {
 } from '@anthropic-ai/claude-agent-sdk';
 import { Message, TaskState } from "@a2a-js/sdk";
 import { AgentExecutor, RequestContext, ExecutionEventBus } from "@a2a-js/sdk/server";
-import { TaskNotCancelableError } from "@a2a-js/sdk/errors";
+import { TaskNotCancelableError, UnsupportedOperationError } from "@a2a-js/sdk/errors";
 import path from 'path';
 import A2AResponse from './A2AResponse';
 import SessionStore from './sessionStore';
@@ -85,6 +85,24 @@ class ClaudeCodeExecutor implements AgentExecutor {
         this.claudeConfig = claudeConfig;
         this.cwd = claudeConfig.cwd ?? process.cwd();
         this.sessions = new SessionStore(this.cwd);
+    }
+
+    /**
+     * Rejects a follow-up turn aimed at a task that is still WORKING.
+     *
+     * Called by `GuardedRequestHandler` BEFORE the SDK opens an event bus or
+     * runs the executor, because there is no safe way to refuse from inside
+     * `execute()` — see the long comment on that class.
+     *
+     * @throws UnsupportedOperationError when the task is busy.
+     */
+    public assertAcceptsFollowUp(taskId: string | undefined): void {
+        if (!taskId || !this.running.isBusy(taskId)) return;
+
+        a2aLog('error', `Rejected a follow-up on task ${taskId}: still working`);
+        throw new UnsupportedOperationError({
+            message: `Task ${taskId} is still working; wait for input-required or send a new message without taskId.`,
+        });
     }
 
     async execute(

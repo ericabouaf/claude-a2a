@@ -99,6 +99,17 @@ export class TaskRegistry {
     this.entries.delete(taskId);
   }
 
+  /**
+   * True when a query is still running for this task and is NOT parked on a
+   * question — i.e. the task is busy and cannot take a follow-up turn.
+   *
+   * A parked task (`pendingPrompt` set) is the opposite: its previous turn's
+   * stream is closed at INPUT_REQUIRED and it is precisely waiting for one.
+   */
+  public isBusy(taskId: string): boolean {
+    const entry = this.entries.get(taskId);
+    return entry !== undefined && entry.pendingPrompt === undefined && !entry.canceled;
+  }
 
   public get size(): number {
     return this.entries.size;

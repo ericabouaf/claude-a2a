@@ -2,10 +2,11 @@
 
 import express from "express";
 import { A2A_PROTOCOL_VERSION, AGENT_CARD_PATH, type AgentCard } from "@a2a-js/sdk";
-import { DefaultRequestHandler, InMemoryTaskStore } from "@a2a-js/sdk/server";
+import { InMemoryTaskStore } from "@a2a-js/sdk/server";
 import { agentCardHandler, jsonRpcHandler, UserBuilder } from "@a2a-js/sdk/server/express";
 
 import ClaudeCodeExecutor from "./executor";
+import GuardedRequestHandler from "./guardedRequestHandler";
 import { ClaudeA2AConfig } from "./types";
 import { loadConfig } from "./configLoader";
 import { allowedLoginsGate, callerServerCallContextBuilder } from "./caller";
@@ -28,7 +29,7 @@ export async function startServer(config: ClaudeA2AConfig) {
 
   const claudeCodeExecutor = new ClaudeCodeExecutor(config.claude ?? {});
 
-  const requestHandler = new DefaultRequestHandler(agentCard, store, claudeCodeExecutor);
+  const requestHandler = new GuardedRequestHandler(agentCard, store, claudeCodeExecutor);
 
   const cardHandler = agentCardHandler({ agentCardProvider: requestHandler });
 

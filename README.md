@@ -328,6 +328,35 @@ Republishing the task in a non-terminal, non-`working` state is safe:
 `message` event or on a `statusUpdate` whose state is terminal or
 `input-required` — a `task` event never ends the stream, whatever its state.
 
+## One turn at a time per task
+
+Every turn of a task shares a single event bus (`createOrGetByTaskId`) — that
+is what lets a follow-up resume a parked task at all. The flip side: a turn
+arriving while another is still open would publish into the *other* turn's live
+`ExecutionEventQueue`, and the head `task` snapshot above is exactly what
+`_advanceStreamPattern` rejects there:
+
+```
+Stream ordering violation: received task in task lifecycle stream.
+```
+
+So a message carrying a `taskId` whose task is **working** (running, not parked
+on a question) is refused, and the refusal touches nothing but the new request:
+
+```json
+{ "jsonrpc": "2.0", "id": 1, "error": {
+  "message": "Task <id> is still working; wait for input-required or send a new message without taskId." } }
+```
+
+The check runs in `GuardedRequestHandler` (`src/guardedRequestHandler.ts`),
+*before* the SDK opens the bus, and not inside `execute()` — throwing from
+`execute()` makes it worse, because `_runStreamExecutor` catches that and
+publishes a synthetic `task` + `statusUpdate(FAILED)` on the shared bus, i.e.
+the very events the guard exists to keep off it. See the comment on that class.
+
+A client that wants to change course on a busy task should either wait for the
+next `input-required`, cancel the task, or start a new one without a `taskId`.
+
 ## Cancellation
 
 `CancelTask` interrupts the Claude query backing
@@ -346,6 +375,7 @@ server that must already be running (`A2A_URL`, default `http://localhost:3008`)
 | `npm run smoke:v1` | a plain single-turn task |
 | `npm run smoke:cancel` | `CancelTask` on a running task |
 | `npm run smoke:input` | `AskUserQuestion` bridged to `input-required`, and the resume |
+| `npm run smoke:overlap` | a follow-up sent while the task is still working is refused, and the running turn is untouched |
 | `npm run smoke:permission` | a structured `permission_response` deny beats a contradicting `yes` and stops the loop; `oui, vas-y` allows |
 
 ```bash

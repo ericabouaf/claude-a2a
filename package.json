@@ -14,8 +14,9 @@
     "smoke:v1": "node scripts/smoke-v1.mjs",
     "smoke:cancel": "node scripts/smoke-cancel.mjs",
     "smoke:input": "node scripts/smoke-input-required.mjs",
+    "smoke:overlap": "node scripts/smoke-overlap.mjs",
     "smoke:permission": "node scripts/smoke-permission.mjs",
-    "smoke": "npm run test:unit && npm run smoke:v1 && npm run smoke:cancel && npm run smoke:input && npm run smoke:permission"
+    "smoke": "npm run test:unit && npm run smoke:v1 && npm run smoke:cancel && npm run smoke:input && npm run smoke:overlap && npm run smoke:permission"
   },
   "keywords": [
     "a2a",
