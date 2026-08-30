@@ -1,6 +1,6 @@
 {
   "name": "claude-a2a",
-  "version": "0.1.0-dev.2",
+  "version": "0.1.0-dev.3",
   "description": "A2A server wrapper around Claude Agent SDK",
   "main": "dist/server.js",
   "bin": {
@@ -10,11 +10,10 @@
     "dist": "npx tsc -p tsconfig.cli.json",
     "dev": "tsx src/server.ts",
     "typecheck": "tsc --noEmit",
-    "smoke:v03": "node scripts/smoke-v03.mjs",
     "smoke:v1": "node scripts/smoke-v1.mjs",
     "smoke:cancel": "node scripts/smoke-cancel.mjs",
     "smoke:input": "node scripts/smoke-input-required.mjs",
-    "smoke": "npm run smoke:v03 && npm run smoke:v1 && npm run smoke:cancel && npm run smoke:input"
+    "smoke": "npm run smoke:v1 && npm run smoke:cancel && npm run smoke:input"
   },
   "keywords": [
     "a2a",

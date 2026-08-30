@@ -9,10 +9,8 @@ WARNING: This project is not production ready. Use it at your own risks.
 This project enables Claude Code to be used as an A2A-compatible agent, facilitating integration with other systems that support this AI agent interoperability standard.
 It uses the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk).
 
-The server speaks **A2A protocol v1.0** and keeps **v0.3 clients working** through
-the `@a2a-js/sdk` compatibility layer: v0.3 JSON-RPC methods (`message/stream`,
-`tasks/get`, …) are accepted, and the agent card is served in the v0.3 shape
-unless the request carries an `A2A-Version: 1.0` header.
+The server speaks **A2A protocol v1.0** only (JSON-RPC binding, `@a2a-js/sdk` 1.x).
+v0.3 clients are not supported.
 
 ## Quickstart
 
@@ -183,7 +181,7 @@ question is denied and the task ends `canceled`.
 
 ## Cancellation
 
-`tasks/cancel` (v0.3) / `CancelTask` (v1.0) interrupts the Claude query backing
+`CancelTask` interrupts the Claude query backing
 the task: the server calls `query.interrupt()`, aborts the query, and publishes
 a final `TASK_STATE_CANCELED` status update. A task that is not running on this
 server is rejected with `TaskNotCancelable`.
