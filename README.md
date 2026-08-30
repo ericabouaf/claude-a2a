@@ -131,11 +131,14 @@ permission the `permissionMode` does not auto-allow — the task moves to
 stays alive in the background while the A2A turn ends, and the next message
 carrying the same `taskId` resumes it.
 
-The `input-required` status message carries two parts: a `text` part rendering
-the prompt in plain language, and an `application/json` `data` part for clients
-that want to answer programmatically.
+The `input-required` status message carries two parts, and they do **not**
+overlap: the `text` part is the bare prompt (the question text(s), one per line;
+or `Claude wants to use <tool>.`), and the `application/json` `data` part holds
+everything else — options, descriptions, tool input. A client can render both
+without printing anything twice.
 
-A question (`AskUserQuestion`):
+A question (`AskUserQuestion`) — text part: `Which colour do you prefer?`, data
+part:
 
 ```json
 {
@@ -154,14 +157,16 @@ A question (`AskUserQuestion`):
 }
 ```
 
-A permission request:
+A permission request — text part:
+``Claude wants to run `rm -rf build`.``, data part:
 
 ```json
 {
   "kind": "permission_request",
   "toolName": "Bash",
   "input": { "command": "rm -rf build" },
-  "title": "Claude wants to run `rm -rf build`"
+  "title": "Claude wants to run `rm -rf build`",
+  "decisionReason": "Bash command not in allowedTools"
 }
 ```
 
@@ -178,6 +183,42 @@ Send another message on the **same `taskId`** (and `contextId`):
 
 Cancelling a task parked in `input-required` works as usual: the pending
 question is denied and the task ends `canceled`.
+
+## Event stream contract (`metadata.kind`)
+
+Every status update the server publishes carries its status **message** — and
+that message's `metadata.kind` says what the text is, so a client does not have
+to guess from the text itself. The status update event carries the same `kind`
+in its own `metadata` when the message has no text to show (`resumed`).
+
+| `metadata.kind` | Task state | Message text | Data part |
+|---|---|---|---|
+| `tool_use` | `working` | `Calling tool <toolName>` | — (`toolName` is in `metadata`) |
+| `result` | `working` | Claude's final answer for the turn | — |
+| `ask_user_question` | `input-required` | the question text(s), one per line | `{ kind, questions }` |
+| `permission_request` | `input-required` | `Claude wants to use <title ?? toolName>.` | `{ kind, toolName, input, title, decisionReason }` |
+| `resumed` | `working` | *(none — the message carries only metadata)* | — |
+
+Status updates with no message (`completed`) or with an unmarked message
+(`failed`, `canceled`) carry no `kind`: treat an absent `metadata.kind` as
+plain text.
+
+## Resuming a parked task
+
+A follow-up turn answering an `input-required` task must start, like any A2A
+stream, with a `task` or `message` event. This server publishes the **stored
+task, verbatim** — same id, still in `input-required`, with its artifacts and
+history — as a pure snapshot, immediately followed by a `working` status update
+tagged `kind: "resumed"`. So:
+
+- a `task` event in `submitted` with an id the client has not seen = a new task;
+- a `task` event in `input-required` with an id the client is answering = a
+  resume.
+
+Republishing the task in a non-terminal, non-`working` state is safe:
+`ExecutionEventQueue.events()` (in `@a2a-js/sdk`) terminates a stream only on a
+`message` event or on a `statusUpdate` whose state is terminal or
+`input-required` — a `task` event never ends the stream, whatever its state.
 
 ## Cancellation
 

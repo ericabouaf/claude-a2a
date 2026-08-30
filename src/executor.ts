@@ -139,7 +139,14 @@ class ClaudeCodeExecutor implements AgentExecutor {
         const a2aResponse = new A2AResponse(requestContext, eventBus);
 
         // A2A requires a `task` (or `message`) as the first event of a stream.
-        a2aResponse.publishTaskResumed(requestContext.task);
+        // We publish the STORED task verbatim (same id, still INPUT_REQUIRED,
+        // its artifacts and history) rather than a fabricated `working` task,
+        // so the client can recognise a resume from the `task` event alone;
+        // the `working` transition is the `resumed` status update right after.
+        // See `A2AResponse.publishTaskSnapshot` for why an INPUT_REQUIRED
+        // `task` event does not terminate this turn's stream.
+        a2aResponse.publishTaskSnapshot(requestContext.task);
+        a2aResponse.publishStatusUpdateResumed();
 
         const entry = this.running.get(taskId);
         const pending = entry?.pendingPrompt;
@@ -190,7 +197,7 @@ class ClaudeCodeExecutor implements AgentExecutor {
             allowedTools: this.claudeConfig.allowedTools,
             maxTurns: this.claudeConfig.maxTurns,
             canUseTool: (toolName, input, options) =>
-                this.handleToolPrompt(entry, toolName, input, options.title),
+                this.handleToolPrompt(entry, toolName, input, options.title, options.decisionReason),
             hooks: {
                 PostToolUse: [{
                     hooks: [async (input, _toolUseID, _options) => {
@@ -217,16 +224,18 @@ class ClaudeCodeExecutor implements AgentExecutor {
     /**
      * `canUseTool`: everything Claude cannot decide on its own lands here.
      *
-     * Publishes an `input-required` status carrying both a plain-language
-     * rendering and a `data` part the client can answer programmatically, then
-     * returns a promise that stays pending until the A2A client replies (or the
-     * task is canceled).
+     * Publishes an `input-required` status carrying the bare prompt as text
+     * and every detail (options, tool input, …) in a `data` part the client can
+     * answer programmatically, then returns a promise that stays pending until
+     * the A2A client replies (or the task is canceled). The status message is
+     * tagged `metadata.kind` with the same value as the data part's `kind`.
      */
     private handleToolPrompt(
         entry: TaskEntry,
         toolName: string,
         input: Record<string, unknown>,
-        title: string | undefined
+        title: string | undefined,
+        decisionReason?: string
     ): Promise<PermissionResult> {
         if (entry.canceled) {
             return Promise.resolve({ behavior: 'deny', message: 'Task canceled', interrupt: true });
@@ -249,7 +258,7 @@ class ClaudeCodeExecutor implements AgentExecutor {
         const kind: PendingPrompt['kind'] = isQuestion ? 'ask_user_question' : 'permission_request';
         const { text, data } = isQuestion
             ? renderQuestionPrompt(input)
-            : renderPermissionPrompt(toolName, input, title);
+            : renderPermissionPrompt(toolName, input, title, decisionReason);
 
         claudeLog('debug', `Parking task ${entry.taskId} on a ${kind} (${toolName})`);
 
@@ -259,7 +268,9 @@ class ClaudeCodeExecutor implements AgentExecutor {
             // Publish first, release the turn second: the request handler reads
             // the LAST state published on the bus when `execute()` resolves, and
             // it must read INPUT_REQUIRED to keep the bus alive.
-            a2aResponse.publishStatusUpdateInputRequired(a2aResponse.buildPromptMessage(text, data));
+            a2aResponse.publishStatusUpdateInputRequired(
+                a2aResponse.buildPromptMessage(text, data, { kind })
+            );
             entry.turn.resolve();
         });
     }
@@ -329,8 +340,15 @@ class ClaudeCodeExecutor implements AgentExecutor {
                     if (block.type === 'tool_use') {
                         const toolName = block.name;
 
+                        // `metadata.kind` lets a client tell tool activity
+                        // apart from the answer; the text is unchanged for
+                        // clients that only read text parts.
                         entry.a2aResponse.publishStatusUpdateWorking(
-                          entry.a2aResponse.buildTextMessage(`Calling tool ${toolName}`)
+                          entry.a2aResponse.buildTextMessage(
+                            `Calling tool ${toolName}`,
+                            undefined,
+                            { kind: 'tool_use', toolName }
+                          )
                         );
                     }
                   }
@@ -343,9 +361,15 @@ class ClaudeCodeExecutor implements AgentExecutor {
                     } else {
                       const claudeTextResponse = message.result;
 
-                      // Sends claude response as working text message
+                      // Sends claude response as working text message, tagged
+                      // `kind: 'result'` so a client can render it as the
+                      // agent's answer rather than as progress noise.
                       entry.a2aResponse.publishStatusUpdateWorking(
-                        entry.a2aResponse.buildTextMessage(claudeTextResponse)
+                        entry.a2aResponse.buildTextMessage(
+                          claudeTextResponse,
+                          undefined,
+                          { kind: 'result' }
+                        )
                       );
                     }
 
@@ -516,38 +540,36 @@ function readMessageParts(message: Message): { text: string; data: Record<string
     return { text, data };
 }
 
-/** Renders an `AskUserQuestion` input as plain language + a machine readable part. */
+/**
+ * Renders an `AskUserQuestion` input.
+ *
+ * The text part carries the QUESTIONS ONLY, one per line — no options, no
+ * "reply here" hint. Options, headers and `multiSelect` live in the `data`
+ * part alone, so a client rendering both parts never prints them twice.
+ */
 function renderQuestionPrompt(input: Record<string, unknown>): { text: string; data: unknown } {
     const questions = (Array.isArray(input.questions) ? input.questions : []) as AskUserQuestion[];
 
-    const rendered = questions.map((question, index) => {
-        const prefix = questions.length > 1 ? `${index + 1}. ` : '';
-        const options = (question.options ?? []).map((option) => {
-            const description = option.description ? ` — ${option.description}` : '';
-            return `  - ${option.label}${description}`;
-        });
-        const multi = question.multiSelect ? ' (several answers allowed)' : '';
-        return [`${prefix}${question.question}${multi}`, ...options].join('\n');
-    });
-
-    const text = [
-        questions.length > 1 ? 'Claude needs answers before it can continue:' : 'Claude needs an answer before it can continue:',
-        ...rendered,
-        'Reply on this task with the option you pick (free text works).',
-    ].join('\n\n');
+    const text = questions.map((question) => question.question).join('\n');
 
     return { text, data: { kind: 'ask_user_question', questions } };
 }
 
-/** Renders a tool permission request as plain language + a machine readable part. */
+/**
+ * Renders a tool permission request.
+ *
+ * As for questions, the text part is the bare sentence; the tool name, its
+ * input, the title and any decision reason live only in the `data` part.
+ */
 function renderPermissionPrompt(
     toolName: string,
     input: Record<string, unknown>,
-    title: string | undefined
+    title: string | undefined,
+    decisionReason?: string
 ): { text: string; data: unknown } {
     return {
-        text: `Claude wants to use ${title ?? toolName}. Reply "yes" to allow or anything else to deny.`,
-        data: { kind: 'permission_request', toolName, input, title },
+        text: `Claude wants to use ${title ?? toolName}.`,
+        data: { kind: 'permission_request', toolName, input, title, decisionReason },
     };
 }
 

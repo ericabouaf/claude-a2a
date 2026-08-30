@@ -3,9 +3,14 @@
  * A2A v1.0 input-required smoke test.
  *
  * Turn 1 forces Claude to call `AskUserQuestion`; the server must bridge it to
- * an `input-required` (6) status carrying the question as text and as a
- * `data` part. Turn 2 answers on the SAME taskId/contextId and the task must
- * resume and complete (3) with an answer mentioning the chosen colour.
+ * an `input-required` (6) status carrying ONLY the question as text (the
+ * options live in the `data` part alone). Turn 2 answers on the SAME
+ * taskId/contextId and the task must resume and complete (3) with an answer
+ * mentioning the chosen colour.
+ *
+ * It also asserts the `metadata.kind` contract on the status messages:
+ * `tool_use` for tool activity, `result` for Claude's final answer, and the
+ * resume snapshot republished as a `task` event still in INPUT_REQUIRED.
  *
  * Usage: npm run smoke:input   (server must already be running on port 3008)
  */
@@ -55,6 +60,13 @@ async function sendTurn(client, label, text, ids = {}) {
     agentText: '',
     promptText: undefined,
     promptData: undefined,
+    promptKind: undefined,
+    /** `metadata.kind` seen on each status message, in order. */
+    kinds: [],
+    /** Texts indexed by the `metadata.kind` of their status message. */
+    textByKind: {},
+    /** The `task` events seen on this turn: `{ id, state }`. */
+    taskEvents: [],
   };
 
   for await (const event of client.sendMessageStream({
@@ -71,6 +83,7 @@ async function sendTurn(client, label, text, ids = {}) {
       result.taskId = value.id;
       result.contextId = value.contextId;
       if (value.status?.state !== undefined) result.states.push(value.status.state);
+      result.taskEvents.push({ id: value.id, state: value.status?.state });
       console.log(`  <- task ${value.id} [state ${value.status?.state}]`);
       continue;
     }
@@ -91,13 +104,21 @@ async function sendTurn(client, label, text, ids = {}) {
     const parts = value.status?.message?.parts ?? [];
     const texts = parts.filter((p) => p.content?.$case === 'text').map((p) => p.content.value);
     const datas = parts.filter((p) => p.content?.$case === 'data').map((p) => p.content.value);
+    const kind = value.status?.message?.metadata?.kind;
 
-    console.log(`  <- statusUpdate [${state}]${texts.length ? ' ' + texts.join(' | ') : ''}`);
+    if (kind !== undefined) result.kinds.push(kind);
+    if (kind !== undefined) {
+      result.textByKind[kind] = (result.textByKind[kind] ?? '') + texts.join('\n');
+    }
+
+    const kindTag = kind ? ` {kind: ${kind}}` : '';
+    console.log(`  <- statusUpdate [${state}]${kindTag}${texts.length ? ' ' + texts.join(' | ') : ''}`);
     for (const t of texts) result.agentText += t + '\n';
 
     if (state === TaskState.TASK_STATE_INPUT_REQUIRED) {
       result.promptText = texts.join('\n');
       result.promptData = datas[0];
+      result.promptKind = kind;
       console.log('  <- input-required data part:');
       console.log(JSON.stringify(datas[0], null, 2));
     }
@@ -119,8 +140,45 @@ async function main() {
     console.error(first.agentText.trim() || '(empty)');
     return 1;
   }
+
+  const problems1 = [];
+
+  // --- the input-required contract ---------------------------------------
   if (first.promptData?.kind !== 'ask_user_question') {
-    console.error(`\nFAIL: input-required data part is not an ask_user_question: ${JSON.stringify(first.promptData)}`);
+    problems1.push(`input-required data part is not an ask_user_question: ${JSON.stringify(first.promptData)}`);
+  }
+  if (first.promptKind !== 'ask_user_question') {
+    problems1.push(`input-required status message metadata.kind is ${JSON.stringify(first.promptKind)}, expected "ask_user_question"`);
+  }
+
+  const options = (first.promptData?.questions ?? []).flatMap((q) => q?.options ?? []);
+  if (options.length !== 2) {
+    problems1.push(`the data part carries ${options.length} option(s), expected 2`);
+  }
+
+  // The text part must be the bare question: no option label, no hint.
+  const promptText = (first.promptText ?? '').toLowerCase();
+  for (const option of options) {
+    const label = String(option?.label ?? '');
+    if (label && promptText.includes(label.toLowerCase())) {
+      problems1.push(`the input-required text part repeats the option label "${label}"`);
+    }
+  }
+  if (/reply on this task/i.test(first.promptText ?? '')) {
+    problems1.push('the input-required text part still carries the "Reply on this task" hint');
+  }
+
+  // --- the metadata.kind contract on turn 1 -------------------------------
+  if (!first.kinds.includes('tool_use')) {
+    problems1.push(`no status message tagged metadata.kind === "tool_use". Kinds seen: [${first.kinds.join(', ')}]`);
+  } else if (!/^Calling tool /.test(first.textByKind.tool_use ?? '')) {
+    problems1.push(`the tool_use text is ${JSON.stringify(first.textByKind.tool_use)}, expected "Calling tool <name>"`);
+  }
+
+  if (problems1.length > 0) {
+    console.error('\nFAIL (turn 1):');
+    for (const problem of problems1) console.error(`  - ${problem}`);
+    console.error(`Prompt text was: ${JSON.stringify(first.promptText)}`);
     return 1;
   }
 
@@ -130,6 +188,24 @@ async function main() {
   });
 
   const problems = [];
+
+  // --- the resume snapshot ------------------------------------------------
+  const snapshot = second.taskEvents[0];
+  if (!snapshot) {
+    problems.push('turn 2 published no `task` event');
+  } else {
+    if (snapshot.id !== first.taskId) {
+      problems.push(`the resume snapshot has id ${snapshot.id}, expected ${first.taskId}`);
+    }
+    if (snapshot.state !== TaskState.TASK_STATE_INPUT_REQUIRED) {
+      problems.push(`the resume snapshot is in state ${snapshot.state}, expected INPUT_REQUIRED (${TaskState.TASK_STATE_INPUT_REQUIRED})`);
+    }
+  }
+  if (!second.kinds.includes('resumed')) {
+    problems.push(`no status update tagged metadata.kind === "resumed". Kinds seen: [${second.kinds.join(', ')}]`);
+  }
+
+  // --- the turn outcome ---------------------------------------------------
   if (!second.states.includes(TaskState.TASK_STATE_COMPLETED)) {
     problems.push(`no COMPLETED (3) status on turn 2. States: [${second.states.join(', ')}]`);
   }
@@ -140,8 +216,16 @@ async function main() {
     problems.push(`the final agent text does not mention "${TURN_2}"`);
   }
 
+  // --- the final answer is tagged `result` --------------------------------
+  const finalText = second.textByKind.result;
+  if (finalText === undefined) {
+    problems.push(`no status message tagged metadata.kind === "result". Kinds seen: [${second.kinds.join(', ')}]`);
+  } else if (!finalText.toLowerCase().includes(TURN_2)) {
+    problems.push(`the "result" text does not mention "${TURN_2}": ${JSON.stringify(finalText)}`);
+  }
+
   if (problems.length === 0) {
-    console.log(`\nPASS: the task parked on AskUserQuestion, resumed on the answer, and completed.`);
+    console.log(`\nPASS: bare question + options in the data part, tool_use/result/resumed metadata, resume snapshot, completed.`);
     return 0;
   }
 

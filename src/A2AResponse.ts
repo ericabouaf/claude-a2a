@@ -3,6 +3,13 @@ import { AgentEvent, AgentExecutionEvent, ExecutionEventBus, RequestContext } fr
 import { randomUUID } from "node:crypto";
 import { a2aLog } from './logger';
 
+/**
+ * A2A metadata bag (proto `Struct`). Used here to carry the `kind` discriminator
+ * documented in the README: `tool_use`, `result`, `ask_user_question`,
+ * `permission_request`, `resumed`.
+ */
+export type Metadata = { [key: string]: any };
+
 /** Builds an A2A v1.0 text `Part`. */
 function buildTextPart(text: string): Part {
     return {
@@ -68,7 +75,7 @@ class A2AResponse {
         }));
     }
 
-    public publishStatusUpdateWorking(message?: Message) {
+    public publishStatusUpdateWorking(message?: Message, metadata?: Metadata) {
         a2aLog('out', 'status-update working', message);
         this.publish(AgentEvent.statusUpdate({
             taskId: this.taskId,
@@ -78,7 +85,7 @@ class A2AResponse {
                 message: message,
                 timestamp: new Date().toISOString(),
             },
-            metadata: undefined,
+            metadata,
         }));
     }
 
@@ -156,20 +163,46 @@ class A2AResponse {
     }
 
     /**
-     * Re-opens a parked task: republishes it in the `working` state.
+     * Re-opens a parked task by republishing the STORED task, verbatim.
      *
      * A2A requires the first event of any stream to be a `task` or a `message`
-     * (`DefaultRequestHandler._advanceStreamPattern` throws otherwise), so this
-     * is what a follow-up turn on an input-required task must publish first.
-     * Artifacts and history are carried over from the stored task.
+     * (`DefaultRequestHandler._advanceStreamPattern` throws otherwise), so a
+     * follow-up turn on an input-required task must publish one first.
+     *
+     * It is published as a pure SNAPSHOT — same id, its current
+     * INPUT_REQUIRED state, its artifacts and history — rather than as a
+     * fabricated `working` task, so a client can tell "new task" (state
+     * SUBMITTED) from "resumed task" (state INPUT_REQUIRED, id already known)
+     * from the `task` event alone. The `working` transition is then announced
+     * by the `resumed` status update below.
+     *
+     * Safe against the SDK stream machinery, checked in
+     * `node_modules/@a2a-js/sdk/dist/server/index.js`:
+     *
+     * - `ExecutionEventQueue.events()` stops only on `kind === 'message'` or on
+     *   a `kind === 'statusUpdate'` whose state is terminal or INPUT_REQUIRED.
+     *   A `task` event NEVER terminates the queue, whatever its state — so
+     *   re-publishing the task in INPUT_REQUIRED does not close the new turn's
+     *   stream.
+     * - `_advanceStreamPattern` moves UNDETERMINED -> TASK_LIFECYCLE on a
+     *   `task` event, which is exactly the pattern the rest of the turn
+     *   (statusUpdate / artifactUpdate events) needs.
+     * - `_settleBus` is fed by `trackLatestTaskState`, i.e. the LAST state
+     *   published on the bus, not the first: the snapshot cannot make the
+     *   handler think the turn ended in INPUT_REQUIRED.
+     * - `ResultManager.processTaskEventLocked` merges the event with the
+     *   persisted task (history kept when the event carries none, artifacts
+     *   merged) before saving, so re-publishing the stored task is a no-op on
+     *   the store; the `working` status update right after supersedes the
+     *   state anyway.
      */
-    public publishTaskResumed(storedTask: Task | undefined) {
-        a2aLog('out', 'Task resumed event (working)');
+    public publishTaskSnapshot(storedTask: Task | undefined) {
+        a2aLog('out', 'Task snapshot event (resumed)');
         this.publish(AgentEvent.task({
             id: this.taskId,
             contextId: this.contextId,
-            status: {
-                state: TaskState.TASK_STATE_WORKING,
+            status: storedTask?.status ?? {
+                state: TaskState.TASK_STATE_INPUT_REQUIRED,
                 message: undefined,
                 timestamp: new Date().toISOString(),
             },
@@ -180,11 +213,22 @@ class A2AResponse {
     }
 
     /**
+     * Announces that a parked task is running again: a `working` status update
+     * tagged `kind: 'resumed'`, published right after the task snapshot.
+     */
+    public publishStatusUpdateResumed() {
+        this.publishStatusUpdateWorking(
+            this.buildMetadataMessage({ kind: 'resumed' }),
+            { kind: 'resumed' }
+        );
+    }
+
+    /**
      * Builds an agent message carrying both a human readable rendering and the
      * machine readable payload a client needs to answer programmatically.
      */
-    public buildPromptMessage(text: string, data: unknown): Message {
-        const message = this.buildTextMessage(text);
+    public buildPromptMessage(text: string, data: unknown, metadata?: Metadata): Message {
+        const message = this.buildTextMessage(text, Role.ROLE_AGENT, metadata);
         message.parts = [...message.parts, buildDataPart(data)];
         return message;
     }
@@ -213,17 +257,27 @@ class A2AResponse {
         }));
     }
 
-    public buildTextMessage(messageText: string, role: Role = Role.ROLE_AGENT): Message {
+    public buildTextMessage(messageText: string, role: Role = Role.ROLE_AGENT, metadata?: Metadata): Message {
         return {
             messageId: randomUUID(),
             contextId: this.contextId,
             taskId: this.taskId,
             role: role,
             parts: [buildTextPart(messageText)],
-            metadata: undefined,
+            metadata,
             extensions: [],
             referenceTaskIds: [],
         };
+    }
+
+    /**
+     * Builds a part-less agent message: nothing to read, only a `metadata.kind`
+     * for the client to switch on.
+     */
+    public buildMetadataMessage(metadata: Metadata, role: Role = Role.ROLE_AGENT): Message {
+        const message = this.buildTextMessage('', role, metadata);
+        message.parts = [];
+        return message;
     }
 }
 
