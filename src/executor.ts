@@ -21,10 +21,9 @@ class ClaudeCodeExecutor implements AgentExecutor {
         eventBus: ExecutionEventBus
     ): Promise<void> {
         const { taskId, contextId, userMessage } = requestContext;
-        function isTextPart(part: any): part is { kind: 'text'; text: string } {
-            return part && part.kind === 'text' && typeof part.text === 'string';
-        }
-        const userText = userMessage.parts?.find(isTextPart)?.text || "";
+        // A2A v1.0: parts carry a `content` oneof discriminated by `$case`.
+        const firstTextPart = userMessage.parts?.find((part) => part.content?.$case === 'text');
+        const userText = firstTextPart?.content?.$case === 'text' ? firstTextPart.content.value : "";
 
         a2aLog('in', `Request received (taskId: ${taskId}, contextId: ${contextId})`, {userText});
 
@@ -197,7 +196,10 @@ class ClaudeCodeExecutor implements AgentExecutor {
     }
   }
 
-  cancelTask = async (): Promise<void> => {};
+  cancelTask = async (_taskId: string, _eventBus: ExecutionEventBus): Promise<void> => {
+    // TODO step 3: interrupt the running Claude query for this task and publish
+    // a TASK_STATE_CANCELED status update on the bus. No-op for now.
+  };
 }
 
 export default ClaudeCodeExecutor;

@@ -9,6 +9,11 @@ WARNING: This project is not production ready. Use it at your own risks.
 This project enables Claude Code to be used as an A2A-compatible agent, facilitating integration with other systems that support this AI agent interoperability standard.
 It uses the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk).
 
+The server speaks **A2A protocol v1.0** and keeps **v0.3 clients working** through
+the `@a2a-js/sdk` compatibility layer: v0.3 JSON-RPC methods (`message/stream`,
+`tasks/get`, …) are accepted, and the agent card is served in the v0.3 shape
+unless the request carries an `A2A-Version: 1.0` header.
+
 ## Quickstart
 
 ### Global Installation
@@ -59,7 +64,32 @@ npm run typecheck
 ## Configuration
 
 The server starts by default on port 3008. The agent card is accessible at:
-- `http://localhost:3008/.well-known/agent-card`
+- `http://localhost:3008/.well-known/agent-card.json` (also served on the
+  pre-v1.0 path `/.well-known/agent-card`)
+
+Optional settings are read from `.claude/claude-a2a.config.json` in the current
+working directory:
+
+```json
+{
+  "server": {
+    "port": 3008,
+    "publicUrl": "https://my-agent.example.com"
+  },
+  "agentCard": {
+    "name": "My Claude Agent",
+    "description": "A Claude Code agent exposed over A2A.",
+    "version": "1.0.0",
+    "capabilities": { "streaming": true, "pushNotifications": false },
+    "defaultInputModes": ["text"],
+    "defaultOutputModes": ["text"],
+    "skills": []
+  }
+}
+```
+
+`server.publicUrl` is the URL advertised in the agent card's
+`supportedInterfaces`; it defaults to `http://localhost:<port>`.
 
 ## Features
 
@@ -67,10 +97,6 @@ The server starts by default on port 3008. The agent card is accessible at:
 - Contextual session management
 - Artifact publishing (created/modified files)
 - Custom hooks to intercept tool usage
-
-## TODOs
-
-- [ ] **Configuration file support**: Add support for external configuration files (.claude/claude-a2a.settings.json) to customize A2A settings
 
 ## Potential Enhancements
 
