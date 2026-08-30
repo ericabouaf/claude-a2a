@@ -3,7 +3,7 @@ import {
     type SDKMessage,
     type SDKUserMessage,
     type PostToolUseHookInput,
-} from '@anthropic-ai/claude-code';
+} from '@anthropic-ai/claude-agent-sdk';
 import { AgentExecutor, RequestContext, ExecutionEventBus } from "@a2a-js/sdk/server";
 import path from 'path';
 import A2AResponse from './A2AResponse';
@@ -59,6 +59,15 @@ class ClaudeCodeExecutor implements AgentExecutor {
           claudeSessionId,
         });
 
+        // Deferred resolved once the Claude `result` message has been received.
+        let resolveDone: () => void;
+        const done = new Promise<void>((resolve) => { resolveDone = resolve; });
+
+        // IMPORTANT: an AsyncIterable prompt (streaming input mode) is required for
+        // the hooks / interrupt features to be available. The generator must stay
+        // open until Claude is done: closing it early prevents hooks from running.
+        // It is released by `done` as soon as the result message arrives, so the
+        // generator terminates cleanly and nothing leaks per task.
         const promptIteratorInstance = (async function* (): AsyncIterable<SDKUserMessage> {
             yield {
                 type: 'user',
@@ -66,14 +75,11 @@ class ClaudeCodeExecutor implements AgentExecutor {
                     role: 'user',
                     content: userText
                 },
-                session_id: claudeSessionId
-            } as SDKUserMessage;
+                parent_tool_use_id: null,
+                session_id: claudeSessionId,
+            };
 
-            // IMPORTANT: Keep the generator opened indefinitly
-            // This allows the Claude code hooks to run (closing the generator will prevent hooks to run)
-            while (true) {
-                await new Promise(() => {});
-            }
+            await done;
         })();
 
 
@@ -109,37 +115,48 @@ class ClaudeCodeExecutor implements AgentExecutor {
             }
         });
 
-        let newClaudeSessionId = null;
-        for await (const message of messages) {
-            // Save claudeSessionId (mapped by A2A contextId) to re-use in future query calls
-            newClaudeSessionId = message.session_id;
-
-            this.logClaudeMessage(message);
-
-            if (message.type === 'assistant') {
-              const msgContent = message.message.content;
-              if(msgContent.type === 'tool_use') {
-                  const toolName = msgContent.name;
-
-                  a2aResponse.publishStatusUpdateWorking(
-                    a2aResponse.buildTextMessage(`Calling tool ${toolName}`)
-                  );
-              }
-            }
-
-            if (message.type === 'result') {
-                if ('result' in message) {
-                  const claudeTextResponse = message.result;
-
-                  // Sends claude response as working text message
-                  a2aResponse.publishStatusUpdateWorking(
-                    a2aResponse.buildTextMessage(claudeTextResponse)
-                  );
+        let newClaudeSessionId: string | null = null;
+        try {
+            for await (const message of messages) {
+                // Save claudeSessionId (mapped by A2A contextId) to re-use in future query calls
+                if ('session_id' in message && message.session_id) {
+                    newClaudeSessionId = message.session_id;
                 }
 
-                // Break the event loop (since it is the last claude message)
-                break;
+                this.logClaudeMessage(message);
+
+                if (message.type === 'assistant') {
+                  // message.content is an array of content blocks
+                  for (const block of message.message.content) {
+                    if (block.type === 'tool_use') {
+                        const toolName = block.name;
+
+                        a2aResponse.publishStatusUpdateWorking(
+                          a2aResponse.buildTextMessage(`Calling tool ${toolName}`)
+                        );
+                    }
+                  }
+                }
+
+                if (message.type === 'result') {
+                    if ('result' in message) {
+                      const claudeTextResponse = message.result;
+
+                      // Sends claude response as working text message
+                      a2aResponse.publishStatusUpdateWorking(
+                        a2aResponse.buildTextMessage(claudeTextResponse)
+                      );
+                    }
+
+                    // Release the prompt generator, then break the event loop
+                    // (since it is the last claude message)
+                    resolveDone!();
+                    break;
+                }
             }
+        } finally {
+            // Make sure the generator is always released (errors, early exits…)
+            resolveDone!();
         }
 
         return newClaudeSessionId;
@@ -151,17 +168,17 @@ class ClaudeCodeExecutor implements AgentExecutor {
       case 'user':
         claudeLog('in', '👤 User Message', message.message);
         break;
-        
+
       case 'assistant':
         claudeLog('in', `🤖 Assistant Message (Model: ${message.message.model})`, message.message.content);
         break;
-        
+
       case 'result':
         claudeLog('in', `📊 Result Message (subtype ${message.subtype}, turns ${message.num_turns}, cost $${message.total_cost_usd.toFixed(6)})`, {
           result: ('result' in message) ? message.result : undefined
         });
         break;
-        
+
       case 'system':
         claudeLog('in', `⚙️ System Message (subtype ${message.subtype})`, {
           model: (message.subtype === 'init') ? message.model : undefined,
@@ -169,17 +186,17 @@ class ClaudeCodeExecutor implements AgentExecutor {
           tools: (message.subtype === 'init') ? message.tools.join(', ') : undefined,
         });
         break;
-        
+
       case 'stream_event':
         // Stream events can be verbose, so we'll just count them
         process.stdout.write('.');
         break;
-        
+
       default:
         console.log('\n📨 Other Message Type:', (message as any).type);
     }
   }
-  
+
   cancelTask = async (): Promise<void> => {};
 }
 

@@ -7,7 +7,7 @@ WARNING: This project is not production ready. Use it at your own risks.
 ## Description
 
 This project enables Claude Code to be used as an A2A-compatible agent, facilitating integration with other systems that support this AI agent interoperability standard.
-It uses the [Claude Code SDK](https://github.com/anthropics/claude-code).
+It uses the [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk).
 
 ## Quickstart
 
@@ -19,11 +19,8 @@ npm install -g claude-a2a
 
 ### Prerequisites
 
-Set your Anthropic API key as an environment variable:
-
-```bash
-export ANTHROPIC_API_KEY=your-api-key-here
-```
+The server uses your local Claude Code login: run `claude` once to log in, and
+the Claude Agent SDK will reuse those credentials. No API key is needed.
 
 ### Running the Server
 
@@ -48,7 +45,7 @@ npm run dev
 ### Build
 
 ```bash
-npm run build
+npm run dist
 ```
 
 Compiles TypeScript to JavaScript in the `dist/` folder
@@ -78,7 +75,7 @@ The server starts by default on port 3008. The agent card is accessible at:
 ## Potential Enhancements
 
 - **Authentication**: Implement authentication mechanisms for secure agent access
-- **Tool expansion**: Enable more Claude Code SDK tools beyond Write, WebSearch, and Edit
+- **Tool expansion**: Enable more Claude Agent SDK tools beyond Write, WebSearch, and Edit
 - **Persistent storage**: Replace in-memory task store with database-backed storage
 - **Error handling**: Enhanced error recovery and retry mechanisms
 - **Monitoring**: Add logging, metrics, and observability features
