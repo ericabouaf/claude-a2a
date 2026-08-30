@@ -5,7 +5,11 @@ import type { PermissionMode, SettingSource } from "@anthropic-ai/claude-agent-s
  * Server configuration options.
  */
 export interface ServerConfig {
-  /** Hostname or IP address to bind */
+  /**
+   * Hostname or IP address to bind. Defaults to `127.0.0.1`: the server has no
+   * authentication of its own, so exposing it beyond loopback (`0.0.0.0`) is an
+   * explicit opt-in, and should be paired with an authenticating reverse proxy.
+   */
   host?: string;
   /** Port to listen on (defaults to 3008) */
   port?: number;
@@ -14,6 +18,12 @@ export interface ServerConfig {
    * Defaults to `http://localhost:${port}` when omitted.
    */
   publicUrl?: string;
+  /**
+   * When set and non-empty, only callers whose `Tailscale-User-Login` header is
+   * in this list may reach the JSON-RPC endpoint; everyone else gets a `403`.
+   * The agent card stays public. Unset (the default) means no gating at all.
+   */
+  allowedLogins?: string[];
 }
 
 /**

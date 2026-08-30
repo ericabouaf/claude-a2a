@@ -15,6 +15,7 @@ import A2AResponse from './A2AResponse';
 import SessionStore from './sessionStore';
 import { TaskRegistry, createDeferred, type PendingPrompt, type TaskEntry } from './taskRegistry';
 import { a2aLog, claudeLog } from './logger';
+import { readCaller } from './caller';
 import type { ClaudeConfig } from './types';
 
 /** How long `cancelTask` waits for `query.interrupt()` before aborting anyway. */
@@ -87,7 +88,11 @@ class ClaudeCodeExecutor implements AgentExecutor {
         const { taskId, contextId, userMessage, task: storedTask } = requestContext;
         const { text: userText, data: userData } = readMessageParts(userMessage);
 
-        a2aLog('in', `Request received (taskId: ${taskId}, contextId: ${contextId})`, {userText});
+        const caller = readCaller(requestContext.context);
+        a2aLog('in', `Request received (taskId: ${taskId}, contextId: ${contextId})`, {
+            caller: caller.login ?? 'anonymous',
+            userText,
+        });
 
         // A follow-up turn answering a parked question / permission prompt.
         if (storedTask?.status?.state === TaskState.TASK_STATE_INPUT_REQUIRED) {

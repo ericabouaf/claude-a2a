@@ -8,9 +8,20 @@ import { agentCardHandler, jsonRpcHandler, UserBuilder } from "@a2a-js/sdk/serve
 import ClaudeCodeExecutor from "./executor";
 import { ClaudeA2AConfig } from "./types";
 import { loadConfig } from "./configLoader";
+import { allowedLoginsGate, callerServerCallContextBuilder } from "./caller";
+
+/**
+ * Default bind address: loopback only. The server has no authentication of its
+ * own, so it must not be reachable from the LAN unless someone opts in by
+ * setting `server.host` (e.g. `0.0.0.0`). To share it, put a reverse proxy that
+ * authenticates in front of it — see the Tailscale section of the README.
+ */
+const DEFAULT_HOST = "127.0.0.1";
 
 export async function startServer(config: ClaudeA2AConfig) {
   const port = config.server?.port || 3008;
+  const host = config.server?.host || DEFAULT_HOST;
+  const allowedLogins = config.server?.allowedLogins;
 
   const store = new InMemoryTaskStore();
   const agentCard = buildAgentCard(config);
@@ -22,17 +33,26 @@ export async function startServer(config: ClaudeA2AConfig) {
   const cardHandler = agentCardHandler({ agentCardProvider: requestHandler });
 
   const expressApp = express();
+  // The agent card is mounted first, and deliberately stays public: a client
+  // must be able to discover the agent before it is allowed to talk to it.
   expressApp.use(`/${AGENT_CARD_PATH}`, cardHandler);
+  if (allowedLogins?.length) {
+    expressApp.use(allowedLoginsGate(allowedLogins));
+  }
   expressApp.use(
     jsonRpcHandler({
       requestHandler,
       userBuilder: UserBuilder.noAuthentication,
+      contextBuilder: callerServerCallContextBuilder,
     })
   );
 
-  expressApp.listen(port, () => {
-    console.log(`🚀 Server started on http://localhost:${port}`);
-    console.log(`🪪 Agent card available at http://localhost:${port}/${AGENT_CARD_PATH}`);
+  expressApp.listen(port, host, () => {
+    console.log(`🚀 Server started on http://${host}:${port}`);
+    console.log(`🪪 Agent card available at http://${host}:${port}/${AGENT_CARD_PATH}`);
+    if (allowedLogins?.length) {
+      console.log(`🔒 Restricted to Tailscale logins: ${allowedLogins.join(", ")}`);
+    }
   });
 
   return agentCard;

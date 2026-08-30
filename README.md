@@ -71,6 +71,7 @@ working directory:
 ```json
 {
   "server": {
+    "host": "127.0.0.1",
     "port": 3008,
     "publicUrl": "https://my-agent.example.com"
   },
@@ -88,6 +89,61 @@ working directory:
 
 `server.publicUrl` is the URL advertised in the agent card's
 `supportedInterfaces`; it defaults to `http://localhost:<port>`.
+
+`server.host` is the bind address, and it defaults to `127.0.0.1`: this server
+has **no authentication of its own**, so it stays on loopback unless you opt in.
+Binding `0.0.0.0` exposes an unauthenticated Claude Code session to your whole
+LAN — only do it behind a reverse proxy that authenticates, as below.
+
+## Exposing the server on a Tailscale tailnet
+
+[`tailscale serve`](https://tailscale.com/kb/1312/serve) runs on the same
+machine, terminates TLS, and reverse-proxies
+`https://<machine>.<tailnet>.ts.net` to the loopback port. Only devices on your
+tailnet can reach it, and Tailscale adds identity headers
+(`Tailscale-User-Login`, `Tailscale-User-Name`, `Tailscale-User-Profile-Pic`) to
+every request it proxies.
+
+```bash
+tailscale serve --bg 3008   # proxy https://<machine>.<tailnet>.ts.net -> 127.0.0.1:3008
+tailscale serve status      # check what is currently served
+```
+
+Config side:
+
+```json
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3008,
+    "publicUrl": "https://my-machine.tailnet-name.ts.net",
+    "allowedLogins": ["you@example.com"]
+  }
+}
+```
+
+- Keep `host` on `127.0.0.1`: `tailscale serve` connects locally, so the server
+  never needs to listen anywhere else. Everything reaching it then comes through
+  the proxy, headers included.
+- `publicUrl` **must** be the tailnet URL. The agent card advertises it in
+  `supportedInterfaces`, and a remote client follows that URL for every call —
+  leave it on `http://localhost:3008` and clients will talk to themselves.
+- `allowedLogins` is optional. When set and non-empty, a request whose
+  `Tailscale-User-Login` is missing or not in the list is answered `403
+  {"error":"forbidden"}` before it reaches the agent. The agent card stays
+  public: a client must be able to discover the agent before it may talk to it.
+  Unset (the default) means no gating — any tailnet device can drive the agent.
+- The caller's login is stored on the A2A `ServerCallContext.state` under
+  `caller` and logged with every incoming request (`caller: <login>`, or
+  `anonymous` when the header is absent).
+
+⚠️ Anyone who gets through reaches a Claude Code session running with
+`permissionMode` `acceptEdits` in the configured `cwd` — it can read and write
+files there. Treat access as equivalent to a shell on that directory.
+
+Note that these headers are asserted by the proxy, not verified by this server:
+they are trustworthy only as long as the server is unreachable except through
+`tailscale serve` — which is exactly what the loopback default buys you.
 
 ### Claude options
 
