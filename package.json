@@ -1,7 +1,7 @@
 {
   "name": "claude-a2a",
-  "version": "0.0.4",
-  "description": "A2A server wrapper around Claude Code SDK",
+  "version": "0.1.0-dev.5",
+  "description": "A2A server wrapper around Claude Agent SDK",
   "main": "dist/server.js",
   "bin": {
     "claude-a2a": "dist/server.js"
@@ -9,7 +9,14 @@
   "scripts": {
     "dist": "npx tsc -p tsconfig.cli.json",
     "dev": "tsx src/server.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:unit": "node --no-warnings=MODULE_TYPELESS_PACKAGE_JSON --test scripts/permission-decision.test.mjs",
+    "smoke:v1": "node scripts/smoke-v1.mjs",
+    "smoke:cancel": "node scripts/smoke-cancel.mjs",
+    "smoke:input": "node scripts/smoke-input-required.mjs",
+    "smoke:overlap": "node scripts/smoke-overlap.mjs",
+    "smoke:permission": "node scripts/smoke-permission.mjs",
+    "smoke": "npm run test:unit && npm run smoke:v1 && npm run smoke:cancel && npm run smoke:input && npm run smoke:overlap && npm run smoke:permission"
   },
   "keywords": [
     "a2a",
@@ -21,8 +28,8 @@
   "author": "Eric Abouaf <eric.abouaf@gmail.com>",
   "license": "ISC",
   "dependencies": {
-    "@a2a-js/sdk": "^0.3.4",
-    "@anthropic-ai/claude-code": "^1.0.119",
+    "@a2a-js/sdk": "^1.1.0",
+    "@anthropic-ai/claude-agent-sdk": "^0.3.251",
     "@types/node": "^24.5.2",
     "chalk": "^5.6.2",
     "dotenv": "^17.2.2",

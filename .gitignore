@@ -1,2 +1,4 @@
 node_modules/
 package-lock.json
+.claude/claude-a2a.sessions.json
+dist/
